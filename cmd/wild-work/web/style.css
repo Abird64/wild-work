@@ -38,6 +38,16 @@
   --ch-zcode: #581c87;       /* ZCode 极客深紫檀 */
   --ch-gemini: #88117c;      /* Gemini 官方星云品紫 */
   --ch-codearts: #991b1b;    /* CodeArts 华为云深绯红 */
+  --ch-doubao: #78716c;
+  --ch-doubaowork: #a16207;  /* 豆包工作 深赭黄（与 doubao 的暖石褐刻意同族但可辨：
+                               任务型侧重「行动」，用更暖的黄调区分。对现有色最近邻
+                               ΔE2000 = 9.46（loomy 琥珀），白字对比 4.92 达标） */  /* 豆包工作 暖石褐。
+                               为什么不取品牌色：豆包品牌是蓝紫，但蓝紫系已被
+                               qwenwork(#4f46e5)/qodercom(#7e22ce)/zcode(#581c87)/raccoon(#8e6bf2)
+                               四点占满 —— 实测最近邻 ΔE2000 仅 3.07（对 qodercom），
+                               远差于基线最差的 6.9。按 R99「辨识度优先于品牌色」改用暖石褐：
+                               对现有 21 色最近邻 ΔE2000 = 17.91（oczen 冷灰 #475569），
+                               白字对比 4.80（≥4.5 达标），两项都优于基线现状。 */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -142,6 +152,8 @@ body {
 .btn.primary.alt.zcode { background: var(--ch-zcode); border-color: var(--ch-zcode); }
 .btn.primary.alt.gemini { background: var(--ch-gemini); border-color: var(--ch-gemini); }
 .btn.primary.alt.codearts { background: var(--ch-codearts); border-color: var(--ch-codearts); }
+.btn.primary.alt.doubao { background: var(--ch-doubao); border-color: var(--ch-doubao); }
+.btn.primary.alt.doubaowork { background: var(--ch-doubaowork); border-color: var(--ch-doubaowork); }
 .btn.primary.alt.cline { background: var(--ch-cline); border-color: var(--ch-cline); }
 .btn.primary.alt.custom { background: var(--ch-custom); border-color: var(--ch-custom); }
 
@@ -259,6 +271,8 @@ body {
 .badge.zcode { background: var(--ch-zcode); }
 .badge.gemini { background: var(--ch-gemini); }
 .badge.codearts { background: var(--ch-codearts); }
+.badge.doubao { background: var(--ch-doubao); }
+.badge.doubaowork { background: var(--ch-doubaowork); }
 .badge.cline { background: var(--ch-cline); }
 .badge.custom { background: var(--ch-custom); }
 
