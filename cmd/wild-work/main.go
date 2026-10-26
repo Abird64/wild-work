@@ -46,6 +46,8 @@ import (
 	"wild-work/internal/loopguard"
 	"wild-work/internal/minimax"
 	"wild-work/internal/monkeycode"
+	"wild-work/internal/doubao"
+	"wild-work/internal/doubaowork"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
@@ -199,6 +201,13 @@ func main() {
 	// OpenCodeZen 匿名通道无凭证文件：全程只有一个虚拟账号，
 	// 不经目录扫描、不参与 reload（见 app.reloadAccounts 的说明）。
 	ocAuths := []*auth.Auth{oczen.AnonymousAuth()}
+	// 豆包工作：凭据就是本机客户端浏览器里的登录态（含 httpOnly 的 sessionid），
+	// 本工具**不落任何 token** —— 连 auth 文件里都没有可泄露的东西。
+	// 同样只有一个虚拟账号，不经目录扫描、不参与 reload（与 oczen 同款装配）。
+	dbChatAuths := []*auth.Auth{doubao.ClientAuth()}
+	// 豆包工作（工作任务）：与豆包共用同一个客户端与调试端口，但账号标识独立，
+	// 免得两个渠道的冷却状态互相牵连。同样零凭据落盘。
+	dbWorkAuths := []*auth.Auth{doubaowork.ClientAuth()}
 	// Kilo 免费池同样是免密渠道：没有凭证文件、没有登录流程，只有一个虚拟账号。
 	kiAuths := []*auth.Auth{kilo.AnonymousAuth()}
 	// MiniMax Code：正常多账号渠道，凭据由设备码登录写入 auths/minimax-*.json。
@@ -308,6 +317,20 @@ func main() {
 	}
 	kiPool.SetDisabled(kilo.AnonymousUID, false)
 	kiPool.ClearPenalty(kilo.AnonymousUID)
+	// doubao（普通对话）：单账号渠道（一个客户端 = 一个登录态），state 只记冷却。
+	// 启动时自愈：任何历史脏数据（冷却/禁用）都会让这条没有第二个账号的渠道直接下线。
+	dbChatPool := pool.New(filepath.Join(stateDir, "state-doubao.json"))
+	for _, a := range dbChatAuths {
+		dbChatPool.Add(a)
+	}
+	dbChatPool.SetDisabled(doubao.ClientUID, false)
+	dbChatPool.ClearPenalty(doubao.ClientUID)
+	dbWorkPool := pool.New(filepath.Join(stateDir, "state-doubaowork.json"))
+	for _, a := range dbWorkAuths {
+		dbWorkPool.Add(a)
+	}
+	dbWorkPool.SetDisabled(doubaowork.ClientUID, false)
+	dbWorkPool.ClearPenalty(doubaowork.ClientUID)
 	// MiniMax：真多账号池（每个 MiniMax 账号一份 OAuth 凭据），不置 SingleAccount。
 	mimPool := pool.New(filepath.Join(stateDir, "state-minimax.json"))
 	for _, a := range mimAuths {
@@ -373,6 +396,14 @@ func main() {
 	// New() 内两个 client 已共用同一 Transport，这里无需再赋 Transport。
 	kiUp := kilo.New()
 	kiUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 豆包工作：**不走 net/http** —— 请求在客户端页面上下文里发（CDP），
+	// 签名由前端 hook 注入。因此没有 HTTP client 可配，也没有 StreamHTTP 超时语义：
+	// R35「流式必须独立 StreamHTTP 且不设 Timeout」在本渠道不适用，
+	// 流式超时改由 CDP 事件静默判定（见 doubao.pump 的 idle/hard 双闸）。
+	dbChatUp := doubao.New("")
+	// 豆包工作：同一条 CDP 通道，但每条请求会多走「建会话 → modify → 发消息 → 删会话」
+	// 四步页面内 fetch（见 internal/doubaowork/work.go）。
+	dbWorkUp := doubaowork.New("")
 	// MiniMax：推理是 Anthropic Messages 形状且恒流式，长思考常见 ⇒ 非流式 client 留总超时兜底，
 	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
 	mimUp := minimax.New()
@@ -596,6 +627,13 @@ func main() {
 		// NoCooldownOnServerError 保留（语义已被 SingleAccount 涵盖，留着不依赖顺序）。
 		provider.Oczen: {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, StaticModels: oczen.StaticModels(),
 			SingleAccount: true, NoCooldownOnServerError: true},
+		// doubao（普通对话）：单账号渠道 ⇒ SingleAccount（任何账号级惩罚都等于整条渠道下线）。
+		// 与 oczen/kilo 的区别：它有**真实登录态**，会话失效必须能被看见并修复（R76/R96），
+		// 所以不置 NoCooldownOnServerError，ErrSessionDead 仍走可自愈标记而非永久禁用。
+		provider.Doubao: {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp,
+			StaticModels: doubao.StaticModels(), SingleAccount: true},
+		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp,
+			StaticModels: doubaowork.StaticModels(), SingleAccount: true},
 		// kilo：同为无账号渠道（免密免费池，虚拟账号不可重登），语义与 oczen 一致——
 		// 任何账号级惩罚（冷却/计数/禁用）都等于整条渠道下线，故声明 SingleAccount，
 		// 由 handler 对所有错误一律原文透传。
@@ -628,6 +666,10 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
+		// doubao（普通对话）：**不给 Scheduler** —— 查遍客户端 UI 与 /alice/ 端点没有「签到领额度」
+		// 这一动作，额度形态是窗口限流自动重置 + 活动赠送额度（R39：[]int{} = 本渠道无此定时任务）。
+		provider.Doubao:    {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp},
+		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp},
 		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
 		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
 		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},

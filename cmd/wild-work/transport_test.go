@@ -42,9 +42,25 @@ func TestEveryRuntimeUpstreamIsWrapped(t *testing.T) {
 		t.Fatal("未找到 wrapDumps 接线表（正则失效？）")
 	}
 
+	// 结构性例外：**CDP 驱动、没有 net/http client** 的渠道。
+	//
+	// doubaowork 的全部上游调用都在本机豆包客户端的页面上下文里发（见
+	// internal/doubao 包注释与 docs/豆包渠道调研.md）——它的字面量里
+	// 没有 .HTTP / .StreamHTTP 字段可供包装。这不是「漏接线」，而是本渠道不存在
+	// 这条接线；若强行给它造一对空 client 塞进 wrapDumps，反而会引入一个
+	// 永不使用的假对象。故在此显式登记，新增同类渠道时必须同步加进来。
+	noHTTPClient := map[string]string{
+		"Doubao":     "请求经 CDP 在豆包客户端页面内发出，无 net/http client",
+		"Doubaowork": "同上（且每条请求额外走建会话/改属性/删会话三步 IM 端点）",
+	}
+
 	var missing []string
 	for _, m := range rts {
 		kind, up := m[1], m[2]
+		if reason, exempt := noHTTPClient[kind]; exempt {
+			t.Logf("豁免 %s：%s", kind, reason)
+			continue
+		}
 		clients, ok := wrapped[kind]
 		if !ok {
 			missing = append(missing, kind+"（整条渠道未进 wrapDumps 表）")
