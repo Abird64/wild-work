@@ -26,9 +26,11 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/ledger"
 	"wild-work/internal/oczen"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
+	"wild-work/internal/stats"
 )
 
 // aliasUpstream 假上游：记录最后一次请求体（用于断言内层真正发给上游的模型名），
@@ -311,5 +313,141 @@ func TestChatCompletionsAliasHotUpdate(t *testing.T) {
 	}
 	if upB.calls != 1 {
 		t.Errorf("清空后不得再派发上游，workbuddy 累计 %d 次（want 1）", upB.calls)
+	}
+}
+
+// ---- 记账口径（MINOR-1）：别名请求必须记到**真模型**名下 ----
+//
+// 缺陷形态（审核定位）：`acctModel := CanonicalModelID(clientModel)` 取的是**别名**，
+// 于是 statRow.Model / stats.AddUsage / ledger.Model 全记 `fast`：
+//   - `stats/usage.go` 的 `channelOfModel` 对裸名返回 ok=false，`stats.go` 的
+//     「今日 Token」累加只认 ok==true 的行 ⇒ 别名请求的 token 从平台表静默消失；
+//   - 同一条路径里降级分支记的却是真模型 ⇒ 两套口径并存。
+// 修法：记账基准改用**解析后**的模型名（`CanonicalModelID(resolved)`），
+// `dispModel`（响应 model 字段回显）仍是客户端原值。
+
+// newAliasAccountingHandler 装配带 stats/ledger 的两渠道 handler；上游复用同包
+// 的 acctUpstream（非流式回填 model 字段并上报 11 prompt + 7 completion token）。
+func newAliasAccountingHandler(t *testing.T, mm map[string]string) (*Handler, *stats.Stats, *ledger.Ledger, string) {
+	t.Helper()
+	pa := pool.New(t.TempDir() + "/acct-a.json")
+	pa.Add(oczen.AnonymousAuth())
+	pb := pool.New(t.TempDir() + "/acct-b.json")
+	pb.Add(&auth.Auth{UID: "acct-backup-uid"})
+	ledgerDir := t.TempDir()
+	st, err := stats.New(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld, err := ledger.New(ledgerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ld.Close) // 先于 t.TempDir 清理（LIFO）：Windows 上句柄未关会让清理失败
+	h := NewHandler(Config{
+		Runtimes: map[provider.Kind]*Runtime{
+			provider.Oczen:     {Kind: provider.Oczen, Pool: pa, Upstream: &acctUpstream{}},
+			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: pb, Upstream: &acctUpstream{}},
+		},
+		APIKey: "k", HardCooldown: time.Hour, SoftCooldown: time.Minute,
+		ErrThreshold: 1, ErrCooldown: time.Minute,
+	})
+	h.SetModelMap(mm)
+	h.stats, h.ledger = st, ld
+	return h, st, ld, ledgerDir
+}
+
+// platformTokens 取某渠道在平台表「今日 Token」列的值（ok=false 表示该行不存在）。
+func platformTokens(snap stats.Snapshot, group string) (int64, bool) {
+	for _, p := range snap.Platforms {
+		if p.Group == group {
+			return p.Tokens, true
+		}
+	}
+	return 0, false
+}
+
+// TestAliasAccountingUsesResolvedModel 别名请求的三处记账值都必须是真模型；
+// 响应 model 字段仍回显别名（回显语义不变）。
+func TestAliasAccountingUsesResolvedModel(t *testing.T) {
+	h, st, ld, ledgerDir := newAliasAccountingHandler(t, map[string]string{
+		"fast": "workbuddy/glm-free",
+	})
+	rec := callModel(h, "fast")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("别名请求应 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	ld.Flush() // ledger 缓冲写：须显式落盘后才能读到流水
+
+	// ① 请求日志（面板「最近请求」）：Model = 真模型规范 ID，不是别名
+	// 用 Errorf 而非 Fatalf：三条断言要在同一次运行里各自报出来（变异验证时
+	// 能同时看到「日志记别名」与「平台 Token 漏计」两种症状，而不是被第一条截断）。
+	rows := st.Logs(10)
+	if len(rows) != 1 || rows[0].Model != "workbuddy/glm-free" {
+		t.Errorf("① 请求日志 Model 应为 workbuddy/glm-free（真模型），实际 %+v", rows)
+	}
+
+	// ② token 流水：Model = 上游模型名，Ch = 真渠道（自洽）
+	ues := readUsageToday(t, ledgerDir)
+	if len(ues) != 1 || ues[0].Model != "glm-free" || ues[0].Ch != "workbuddy" {
+		t.Errorf("② 流水应为 Model=glm-free Ch=workbuddy，实际 %+v", ues)
+	}
+
+	// ③ 今日模型消耗 + 平台「今日 Token」列：别名请求的 token 不得静默消失
+	snap := st.Snapshot(time.Now())
+	models := map[string]int64{}
+	for _, m := range snap.Models {
+		models[m.Model] = m.Tokens
+	}
+	if models["workbuddy/glm-free"] != 18 { // 11 prompt + 7 completion
+		t.Errorf("③ 模型消耗行应为 workbuddy/glm-free=18，实际 %v", models)
+	}
+	if _, bad := models["fast"]; bad {
+		t.Errorf("③ 模型消耗不得出现裸别名 fast（channelOfModel 会判 ok=false 而漏计）：%v", models)
+	}
+	if tok, ok := platformTokens(snap, "workbuddy"); !ok || tok != 18 {
+		t.Errorf("③ 平台表 workbuddy 今日 Token = %d（存在=%v），want 18 —— 别名请求漏计时此列恒 0（channelOfModel 对裸名 ok=false）", tok, ok)
+	}
+
+	// ④ 响应 model 字段仍回显客户端原值（口径 4 / D-6：回显语义不变）
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是合法 JSON：%v（body=%s）", err, rec.Body.String())
+	}
+	if resp["model"] != "fast" {
+		t.Errorf("响应 model = %v，want fast（回显客户端原值）", resp["model"])
+	}
+}
+
+// TestAliasAccountingUnchangedWithoutMap 零迁移：空表/nil 表下，全路径请求的记账值
+// 必须与改造前**逐字等价**（改造前的基准就是 CanonicalModelID(clientModel)）。
+func TestAliasAccountingUnchangedWithoutMap(t *testing.T) {
+	const reqModel = "workbuddy/glm-free"
+	for _, tc := range []struct {
+		name string
+		mm   map[string]string
+	}{
+		{"nil 表", nil},
+		{"空表", map[string]string{}},
+	} {
+		h, st, ld, ledgerDir := newAliasAccountingHandler(t, tc.mm)
+		if rec := callModel(h, reqModel); rec.Code != http.StatusOK {
+			t.Fatalf("%s：全路径请求应 200，实际 %d：%s", tc.name, rec.Code, rec.Body.String())
+		}
+		ld.Flush()
+
+		wantRow := provider.CanonicalModelID(reqModel) // == 改造前的 canonModel
+		rows := st.Logs(10)
+		if len(rows) != 1 || rows[0].Model != wantRow {
+			t.Fatalf("%s：请求日志 Model 应为 %q（与改造前一致），实际 %+v", tc.name, wantRow, rows)
+		}
+		ues := readUsageToday(t, ledgerDir)
+		if len(ues) != 1 || ues[0].Model != provider.UpstreamModelOf(reqModel) || ues[0].Ch != "workbuddy" {
+			t.Fatalf("%s：流水应与改造前一致（Model=%s Ch=workbuddy），实际 %+v",
+				tc.name, provider.UpstreamModelOf(reqModel), ues)
+		}
+		if tok, ok := platformTokens(st.Snapshot(time.Now()), "workbuddy"); !ok || tok != 18 {
+			t.Errorf("%s：平台表 workbuddy 今日 Token = %d（存在=%v），want 18", tc.name, tok, ok)
+		}
 	}
 }

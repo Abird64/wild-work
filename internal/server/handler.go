@@ -640,7 +640,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 别名请求**永远不命中**（MS-006 设计口径 4）。
 	// clientModel 仍取客户端原值：响应 model 字段「回填请求名」语义不变（MS-003 已确认）。
 	// model_map 为空/nil 时 resolveAlias 是恒等变换 ⇒ 旧行为逐字不变（口径 5）。
-	rt, model, err := h.runtimeForModel(h.resolveAlias(peek.Model))
+	// resolved 保留给记账用（见下方 canonModel）：别名请求必须记到**真模型**名下，
+	// 否则 stats.channelOfModel 对裸名返回 ok=false，平台「今日 Token」列会静默漏计。
+	resolved := h.resolveAlias(peek.Model)
+	rt, model, err := h.runtimeForModel(resolved)
 
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
@@ -654,7 +657,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// 统计/流水的归一 ID：新旧写法（cline-free/x 与 cline/cline-free/x）归一到同一串，
 	// 否则同一模型会在用量榜/请求日志里裂成两行（R59）；其余渠道为恒等变换。
-	canonModel := provider.CanonicalModelID(clientModel)
+	// 基准取**解析后**的 resolved 而非 clientModel（MS-006 MINOR-1）：别名 `fast` 若按
+	// clientModel 归一，记账值就是裸名 `fast` ⇒
+	//   ① stats/usage.go:172 的 channelOfModel 对裸名返回 ok=false，stats.go:801 只累加
+	//      ok==true 的行 ⇒ 别名请求的 token 从平台「今日 Token」列静默消失；
+	//   ② 同一条路径里降级分支（下方 acctModel=备胎）记的是真模型，两套口径并存。
+	// 取 resolved 后统一为「实际执行模型」：resolved 命中别名时是全路径；未命中/空表时
+	// resolved 与 clientModel 完全相同 ⇒ 记账值与改造前逐字等价（零迁移）。
+	canonModel := provider.CanonicalModelID(resolved)
 	// 模型降级链：请求模型在本渠道已无账号可承载（no_healthy_account 的两种形态——
 	// 「模型全冷」或「整渠道全灭」，pickWithSticky 必败）时，按用户配置的链找第一个
 	// 仍有可用账号的备胎模型顶上；备胎可跨渠道，渠道全灭时不至于直接 503。
