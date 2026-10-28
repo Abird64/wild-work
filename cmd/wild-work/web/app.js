@@ -2299,30 +2299,63 @@ async function toggleAutostart() {
 // fbRules 编辑态副本（openSettings 时从 state.model_fallback 深拷贝；保存成功后由 loadState 刷新）
 let fbRules = [];
 
-// fbFromSet 汇总当前全部主力模型ID（跨规则）：备胎候选/追加/清洗统一从这里排除——
-// 同一 ID 不允许既是某规则主力又出现在任何备胎链。每次下拉 render 实时取，主力列表变更即同步可选范围。
+// fbFromSet 汇总当前全部主力模型ID（跨规则）。
+// 用途只有两处：① 候选下拉把「已作主力」的模型从备胎候选里排掉（去噪，避免点了一个注定
+// 无效的项）；② 新增/追加备胎时给即时反馈。**它不再驱动任何数据删除**（SR-003 / SD-3 甲）。
 function fbFromSet() {
   const s = {};
   for (const r of fbRules) if (r.from) s[r.from] = true;
   return s;
 }
-// fbSanitize 就地清洗 fbRules：从每条备胎链剔除任意规则的主力ID（含历史脏数据），返回剔除条数。
-// renderFbList 每轮渲染前先过一遍（所有编辑路径都经 renderFbList 重渲染，chip 索引始终与清洗后
-// 数组一致），保存前再兜底一次——渲染/比对/落盘共用同一份互斥干净数据。
-function fbSanitize() {
-  const fs = fbFromSet();
-  let dropped = 0;
-  for (const r of fbRules) {
-    const keep = r.to.filter((t) => !fs[t]);
-    dropped += r.to.length - keep.length;
-    r.to = keep;
+
+// fbSelfLoops 自环检查：返回 `{ from, to }` 列表（某规则的备胎等于它自己的主力）。
+// 这是**唯一**的不合法形态——`To` 允许包含其它规则（甚至其它场景）的 `From`：
+// 三场景互为备胎（code 主 traework / 首选备胎 raccoon，complex 反之）是 MS-007 的**有意设计**，
+// 现役配置里那两条互备关系各有 430 / 110 次真实请求在跑（SR-003 任务卡取证）。
+// 旧 fbSanitize 把「任意规则的主力」从**每条**备胎链里剔掉，等于把这份互备当脏数据清洗，
+// 打开设置即静默削弱降级链，还顺带点亮「未保存」提示催用户去落盘——已按甲分支彻底移除。
+// 只读：不改 fbRules，不产生副作用，可在渲染/保存/输入校验任何时机调用。
+function fbSelfLoops(rules) {
+  const out = [];
+  for (const r of (rules || fbRules) || []) {
+    if (!r || !r.from) continue;
+    for (const t of r.to || []) if (t === r.from) out.push({ from: r.from, to: t });
   }
-  return dropped;
+  return out;
+}
+
+// fbSavePayload 生成落盘载荷：**原样**拷贝 fbRules，只做「去空串」与「自环剔除」，
+// 返回 `{ rules, err }`——有自环时 rules = null 且 err 给可辨识文案（宁可整次拒绝，
+// 也不留部分写入，与契约 SR-001「失败语义」一致）。
+// 注意：这里**不做**跨规则剔除。落盘是 G1 的最后一道口子——一旦删，互备关系永久丢失。
+function fbSavePayload() {
+  const loops = fbSelfLoops(fbRules);
+  if (loops.length > 0) {
+    const uniq = [...new Set(loops.map((x) => x.from))];
+    return {
+      rules: null,
+      err: `备胎不能是它自己的主力模型（自环）：${uniq.join("、")}——请先移除对应备胎`,
+    };
+  }
+  const rules = fbRules.map((r) => ({
+    from: r.from,
+    to: (r.to || []).filter((t) => String(t || "").trim() !== ""),
+  }));
+  return { rules, err: null };
+}
+
+// fbSaveGuard 保存前的自环预检：无自环返回空串；有则返回文案（供 #fbErr 直接展示）。
+function fbSaveGuard() {
+  const p = fbSavePayload();
+  return p.err || "";
 }
 
 // updateFbDirty / updateEffDirty：编辑态与服务端态比对，有差异时亮「未保存」提示。
 // 比对基于 JSON 序列化（fbRules/to 顺序敏感——改序也算未保存，语义正确）；保存成功
 // 后服务端态刷新（loadState → openSettings 未重开时由 save 回调手动清），零差异即隐藏。
+// **语义收窄（SR-003 / G1）**：脏标记只反映**用户动作**造成的差异。渲染期不再有任何
+// 程序自身的数据裁剪（fbSanitize 已删），故「刚打开设置即亮红」不会再出现；反过来，
+// 任何一次 fbRules 的变化都必然来自用户（增/删/改序/改主模型），因此这里不会漏报。
 function fbServerRules() { return JSON.stringify(state.model_fallback || []); }
 function updateFbDirty() {
   const el = $("fbDirty");
@@ -2347,14 +2380,18 @@ function updateEffDirty() {
 // 交互全部事件委托在 #fbList 上（data-del-rule / data-del-to / data-add-to / data-edit-idx /
 // dragstart / dragover / drop / dragend），每轮 innerHTML 重建后委托仍然有效。
 function renderFbList() {
-  const dropped = fbSanitize(); // 互斥校验：主力ID不出现在任何备胎链（chip 索引与数据一致）
-  if (dropped > 0) toast(`已自动剔除 ${dropped} 个与主力模型互斥的备胎`); // 唯一剔除时机：打开面板首轮（历史脏数据）/ 改主力波及他链
+  // 渲染只读（SR-003 / G1）：本函数**不得**对 fbRules 做任何写操作。
+  // 旧实现在这里调 fbSanitize() 剔除跨规则备胎 ⇒ 打开设置那一刻编辑态已被削弱，
+  // 且 updateFbDirty() 因这份程序自身造成的差异而亮起「⚠ 有未保存的调整」。
+  // 现在：渲染只按当前数据画卡片；自环拦截只在输入/保存路径（fbSelfLoops / fbSaveGuard）。
+  const loops = fbSelfLoops(fbRules);
   const rows = fbRules.map((r, i) => {
-    const tos = r.to.map((t, j) =>
-      `<span class="fb-to-chip" draggable="true" data-chip="${i}:${j}" data-model="${esc(t)}" title="${esc(t)}（拖动调整顺序，序号 = 降级优先级）">`
+    const tos = r.to.map((t, j) => {
+      const isLoop = t === r.from; // 仅标记，**不改数据**（拦截在保存/输入路径）
+      return `<span class="fb-to-chip"${isLoop ? ' data-loop="1"' : ""} draggable="true" data-chip="${i}:${j}" data-model="${esc(t)}" title="${esc(t)}${isLoop ? "（自环：不能是自己主力的备胎）" : ""}（拖动调整顺序，序号 = 降级优先级）">`
       + `<span class="chip-idx">${j + 1}</span><span class="chip-grip">⠿</span>${esc(t)}`
-      + `<a data-del-to="${i}:${j}" title="移除该备胎">×</a></span>`
-    ).join("");
+      + `<a data-del-to="${i}:${j}" title="移除该备胎">×</a></span>`;
+    }).join("");
     return `<div class="fb-rule-card">
       <div class="fb-rule-head">
         <span class="fb-rule-badge">规则 ${i + 1}</span>
@@ -2370,7 +2407,11 @@ function renderFbList() {
       </div>
     </div>`;
   }).join("");
-  $("fbList").innerHTML = rows || `<div class="fb-empty">暂无规则——原模型无可用账号时将直接返回 503 提示</div>`;
+  $("fbList").innerHTML = (rows || `<div class="fb-empty">暂无规则——原模型无可用账号时将直接返回 503 提示</div>`)
+    // 自环是**唯一**不合法形态，必须在编辑区就能看见（只提示，不删数据）
+    + (loops.length > 0
+      ? `<div class="hint" style="color:var(--danger);margin-top:6px">⚠ 自环：${esc([...new Set(loops.map((x) => x.from))].join("、"))} 的备胎里含它自己的主力模型——保存会被拒绝，请先移除该备胎</div>`
+      : "");
   $("fbErr").textContent = "";
   attachFbPickers();
   updateFbDirty();
@@ -2392,35 +2433,59 @@ function parseModelList(raw) {
 // - 主力模型ID（.fb-from-edit）：单选下拉，选中回填；Enter 无候选时 blur 确认（原行为）。
 // - 行内备胎添加框（.fb-to-add）：多选下拉——点选即追加到备胎链末尾（精确等值去重，
 //   与上游 to.includes 全等语义一致）、已上链模型从候选隐藏、可连续选择多个。
+// fbToPick 备胎候选的排除集 + 追加判定（单一来源，避免「候选能选、点选又静默不做」两套语义）。
+// **只排除两类**：① 本规则自己的主力（自环，唯一不合法形态）；② 本规则已上链的（去重）。
+// 绝不排除「其它规则的主力」——那正是三场景互为备胎（MS-007 有意设计），
+// 旧实现把它当互斥脏数据静默挡掉/剔掉，是 G1 的另一半。
+// fbFromSet 仍保留，但只用于**提示**（见 attachFbPickers 的 title 标注），不再驱动任何删除或拒绝。
+function fbToPick(i) {
+  const r = fbRules[i] || { from: "", to: [] };
+  const exclude = { [r.from]: true };
+  for (const t of r.to || []) exclude[t] = true;
+  return { exclude, blocked: (id) => id === r.from || (r.to || []).includes(id) };
+}
+
 function attachFbPickers() {
+  const fset = fbFromSet(); // 只读快照：给备胎候选加「其它场景主力」提示用
   for (const inp of $("fbList").querySelectorAll(".fb-from-edit")) {
     const self = fbRules[+inp.dataset.editIdx].from; // 自身当前值保留可见，仅排除其他规则主力（重复由 change 唯一性校验兜底）
     attachModelPicker(inp, { excludeSet: () => { const s = { ...fbFromSet() }; delete s[self]; return s; } });
   }
   for (const inp of $("fbList").querySelectorAll(".fb-to-add")) {
     const i = +inp.dataset.addIdx;
+    const pick = fbToPick(i);
     attachModelPicker(inp, {
       stayOpen: true,
-      excludeSet: () => { const s = { ...fbFromSet() }; for (const t of (fbRules[i] && fbRules[i].to) || []) s[t] = true; return s; },
+      excludeSet: () => pick.exclude,
       onPick: (id) => {
         const r = fbRules[i];
         if (!r) return;
-        if (fbFromSet()[id] || r.to.includes(id)) return; // 主力ID或已上链 → 不追加（候选已隐藏，双保险）
+        if (pick.blocked(id)) return; // 自环或已上链 → 不追加（候选已隐藏，双保险）
         r.to.push(id);
         renderFbList();
-        toast(`已加入备胎链第 ${r.to.length} 位（点保存生效）`);
+        toast(fset[id]
+          ? `已作为互备加入第 ${r.to.length} 位（${id} 是其它场景的主力；点保存生效）`
+          : `已加入备胎链第 ${r.to.length} 位（点保存生效）`);
       },
     });
   }
 }
 
 async function saveModelFallback() {
+  // 落盘路径同样**不得**做跨规则删除（SR-003 / G1 的最后一道口子：一删就永久）。
+  // fbSavePayload 只去空串 + 拦自环，有自环即整次拒绝（不留部分写入）。
+  const payload = fbSavePayload();
+  if (payload.err) {
+    $("fbErr").textContent = payload.err;
+    toast(payload.err);
+    return;
+  }
   try {
-    fbSanitize(); // 落盘前互斥兜底（正常路径 renderFbList 已清洗过，防御未来路径）
-    await api("/api/config/model_fallback", { rules: fbRules });
+    await api("/api/config/model_fallback", { rules: payload.rules });
     toast("降级链已保存（热生效）");
     $("fbErr").textContent = "";
-    state.model_fallback = JSON.parse(JSON.stringify(fbRules)); // 即时同步服务端态基准，提示随之熄灭
+    // 即时同步服务端态基准：用实际提交的载荷（已去空串），否则提示恒亮
+    state.model_fallback = JSON.parse(JSON.stringify(payload.rules));
     updateFbDirty();
     loadState();
   } catch (e) { $("fbErr").textContent = e.message; }
@@ -3539,14 +3604,20 @@ function bind() {
     const [tos, err] = parseModelList($("fbToInput").value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) { $("fbErr").textContent = "至少填一个备胎模型ID"; return; }
-    // 互斥预过滤：剔除已有规则主力 + 新 from 自身（renderFbList 兜底同规则，此处前置给即时反馈）
-    const fsx = fbFromSet(); fsx[from] = true;
-    const kept = tos.filter((t) => !fsx[t]);
-    if (kept.length === 0) { $("fbErr").textContent = "备胎均与主力模型互斥（含新主力自身），请更换备胎"; return; }
-    if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个与主力模型互斥的备胎`);
+    // 只拦自环（备胎 == 本规则主力）：这是唯一不合法形态。
+    // **不再过滤其它规则的主力**——那会把「互为备胎」当互斥脏数据挡掉（SR-003 / SD-3 甲）。
+    const loops = tos.filter((t) => t === from);
+    const kept = tos.filter((t) => t !== from);
+    if (kept.length === 0) { $("fbErr").textContent = "备胎不能是它自己的主力模型（自环），请更换备胎"; return; }
+    if (loops.length > 0) toast(`已忽略 ${loops.length} 个自环备胎（与主模型 ${from} 相同）`);
+    const others = fbFromSet();
+    const crossScene = kept.filter((t) => others[t]);
     fbRules.push({ from, to: kept });
     $("fbFromInput").value = ""; $("fbToInput").value = "";
-    renderFbList(); // 内部先 fbSanitize：互斥兜底（预过滤后此处不再剔除）
+    renderFbList(); // 渲染只读：不再做任何清洗
+    if (crossScene.length > 0) {
+      toast(`已加入 ${crossScene.length} 个互备（${crossScene.join("、")} 是其它场景的主力，属合法设计；点保存生效）`);
+    }
   };
   $("btnFbSave").onclick = saveModelFallback;
   $("fbList").addEventListener("click", async (e) => {
@@ -3557,8 +3628,19 @@ function bind() {
       const [tos, err] = parseModelList(inp && inp.value);
       if (err) { $("fbErr").textContent = err; return; }
       if (tos.length === 0) { $("fbErr").textContent = "先在输入框填备胎模型ID 再点 ＋"; return; }
-      fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+      const r = fbRules[i];
+      if (!r) return;
+      const fresh = tos.filter((t) => t !== r.from && !r.to.includes(t)); // 仅拦自环 + 去重
+      const loopCnt = tos.filter((t) => t === r.from).length;
+      if (fresh.length === 0) {
+        $("fbErr").textContent = loopCnt === tos.length
+          ? "备胎不能是它自己的主力模型（自环）"
+          : "这些模型已在该链上（无需重复添加）";
+        return;
+      }
+      r.to.push(...fresh);
       renderFbList();
+      if (loopCnt > 0) toast(`已忽略 ${loopCnt} 个自环备胎`);
       return;
     }
     const delTo = e.target.closest("[data-del-to]");
@@ -3584,8 +3666,19 @@ function bind() {
     const [tos, err] = parseModelList(e.target.value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) return;
-    fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+    const r = fbRules[i];
+    if (!r) return;
+    const fresh = tos.filter((t) => t !== r.from && !r.to.includes(t)); // 仅拦自环 + 去重
+    const loopCnt = tos.filter((t) => t === r.from).length;
+    if (fresh.length === 0) {
+      $("fbErr").textContent = loopCnt === tos.length
+        ? "备胎不能是它自己的主力模型（自环）"
+        : "这些模型已在该链上（无需重复添加）";
+      return;
+    }
+    r.to.push(...fresh);
     renderFbList();
+    if (loopCnt > 0) toast(`已忽略 ${loopCnt} 个自环备胎`);
   });
   // 行内主模型 ID 编辑：change（失焦/回车后 blur）提交——形态校验 + 主模型唯一性校验，
   // 失败回滚输入框；成功写回 fbRules 并滤掉与新 from 自环的备胎，重渲染刷新 title。
@@ -3597,8 +3690,14 @@ function bind() {
     if (!from || from === cur) { e.target.value = cur; return; }
     if (!/^[^/]+\/.+/.test(from)) { $("fbErr").textContent = `主力模型ID ${from} 需为 channel/model 形式（如 workbuddyai/deepseek-v4.1-flash）`; e.target.value = cur; return; }
     if (fbRules.some((r, k) => k !== i && r.from === from)) { $("fbErr").textContent = `主模型 ${from} 已有规则（每个主模型只允许一条）`; e.target.value = cur; return; }
+    // 改成新 from 后，链上若已有同名项就成了自环（唯一不合法形态）⇒ 整次改名拒绝并给出文案，
+    // 而不是顺手把那个备胎删掉（渲染/编辑路径一律不得静默删除数据，SR-003 / G1）。
+    if ((fbRules[i].to || []).includes(from)) {
+      $("fbErr").textContent = `主模型不能改成 ${from}：它已在第 ${i + 1} 条规则的备胎链上（会成为自环），请先移除该备胎`;
+      e.target.value = cur;
+      return;
+    }
     fbRules[i].from = from;
-    fbRules[i].to = fbRules[i].to.filter((t) => t !== from);
     renderFbList();
   });
   // 备胎 chip 拖拽排序（委托在 #fbList；仅同规则内拖动）。drop 后就地 splice fbRules[i].to

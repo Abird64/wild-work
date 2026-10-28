@@ -196,6 +196,17 @@ const patched =
   + ", renderCreditDetail, showCreditDetail, __setCreditDetailState: (st, resp) => { detailState = st; detailCache = { [st.uid]: resp }; }"
   // 「不适用」默认收起（R103）：showNoCredit / acctFilter 都是 `let`，toggle 也要直接调
   + ", applyAcctFilter, toggleNoCredit, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  // 降级链编辑器（SR-003 / G1）：fbRules 是 `let`，只能靠源码作用域内的注入器读写。
+  // fbSelfLoops / fbSaveGuard / fbSavePayload 是修复后新增的只读面（甲分支：只禁自环、
+  // 不禁互备）。这里用 typeof 兜底，是为了让「改动前」的新断言**逐条变红并给出原因**，
+  // 而不是 ReferenceError 把整份检查崩掉——崩掉就看不出红在哪一条上。
+  + ", renderFbList, fbFromSet"
+  + ", __setFbRules: (rs) => { fbRules = JSON.parse(JSON.stringify(rs)); }"
+  + ", __getFbRules: () => JSON.parse(JSON.stringify(fbRules))"
+  + ", __setServerFb: (rs) => { state.model_fallback = JSON.parse(JSON.stringify(rs)); }"
+  + ', fbSelfLoops: typeof fbSelfLoops === "function" ? fbSelfLoops : () => null'
+  + ', fbSaveGuard: typeof fbSaveGuard === "function" ? fbSaveGuard : () => null'
+  + ', fbSavePayload: typeof fbSavePayload === "function" ? fbSavePayload : () => null'
   + " };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
@@ -920,6 +931,113 @@ for (const [label, re] of uniq) {
   ];
   for (const [label, pass] of need) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}`);
+    if (!pass) failed++;
+  }
+}
+
+// ---- 场景 1.8：降级链编辑器「渲染不得改数据」（SR-003 / G1）----
+// 为什么要有这张护栏：缺陷 G1 在改动前**零覆盖**。旧 renderFbList() 每轮渲染前调
+// fbSanitize()，把「任意规则的主力ID」从**每条**备胎链里剔除 ⇒ 打开设置那一刻编辑态
+// 已被削弱，且 fbDirty 因此亮起「⚠ 有未保存的调整」，反向催用户去点保存（一保存就落盘）。
+// SD-3 已裁「互为备胎合法」（甲分支）：`To` 允许含别的场景的 `From`，只禁自环。
+//
+// 现役配置逐字取自运行实例 config.json（采样 2026-10-28 19:0x，三场景互为备胎）：
+//   fast    = qwenwork/flash
+//   code    = traework/deepseek-v4.1-flash        → 首选备胎 raccoon/sn-deepseek-v4-1-flash-1017
+//   complex = raccoon/sn-deepseek-v4-1-flash-1017 → 首选备胎 traework/deepseek-v4.1-flash
+// 旧清洗会削掉 4 项（code 丢 To[0]/To[2]，complex 丢 To[0]/To[1]）——正是真实在跑的互备关系。
+const LIVE_FB = [
+  { from: "qwenwork/flash", to: [
+    "traecode/deepseek-v4.1-flash",
+    "qodercn/glm-5.3-flash",
+    "kilo/cohere/north-mini-code:free",
+  ] },
+  { from: "traework/deepseek-v4.1-flash", to: [
+    "raccoon/sn-deepseek-v4-1-flash-1017",
+    "qodercn/glm-5.3-flash",
+    "qwenwork/flash",
+    "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+  ] },
+  { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: [
+    "traework/deepseek-v4.1-flash",
+    "qwenwork/flash",
+    "qodercn/glm-5.3-flash",
+    "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+  ] },
+];
+{
+  const j = (v) => JSON.stringify(v);
+  const fbNeed = [];
+  const fbCheck = (label, pass, extra) => { fbNeed.push([label, !!pass, extra || ""]); };
+  const totalTo = (rs) => (rs || []).reduce((n, r) => n + ((r.to || []).length), 0);
+  const toOf = (rs, from) => ((rs || []).find((r) => r.from === from) || {}).to || [];
+
+  // 1) 互为备胎必须逐字节存活（甲分支核心断言）
+  T.__setServerFb(LIVE_FB);
+  T.__setFbRules(LIVE_FB);
+  document.getElementById("toast").textContent = "";
+  T.renderFbList();
+  const afterRender = T.__getFbRules();
+  fbCheck("渲染只读：renderFbList() 后 fbRules 与输入逐字节相等（互为备胎合法）",
+    j(afterRender) === j(LIVE_FB),
+    `To ${totalTo(afterRender)}/${totalTo(LIVE_FB)} 项；实际 ${j(afterRender)}`);
+  fbCheck("渲染剔除计数 = 0（现役 3 规则 11 个备胎全部保留，且无「已自动剔除」提示）",
+    totalTo(afterRender) === 11 && !/已自动剔除/.test(document.getElementById("toast").textContent || ""),
+    `To 总数 ${totalTo(afterRender)}/11，toast="${document.getElementById("toast").textContent}"`);
+  fbCheck("code 链 To[0] 仍是 raccoon 备胎（互备在最前位，链序不得被重排）",
+    toOf(afterRender, "traework/deepseek-v4.1-flash")[0] === "raccoon/sn-deepseek-v4-1-flash-1017",
+    j(toOf(afterRender, "traework/deepseek-v4.1-flash")));
+  fbCheck("complex 链 To[0] 仍是 traework 备胎（互为备胎双向都得留）",
+    toOf(afterRender, "raccoon/sn-deepseek-v4-1-flash-1017")[0] === "traework/deepseek-v4.1-flash",
+    j(toOf(afterRender, "raccoon/sn-deepseek-v4-1-flash-1017")));
+
+  // 2) fbDirty 只反映**用户动作**，不反映程序自身裁剪
+  T.__setServerFb(LIVE_FB);
+  T.__setFbRules(LIVE_FB);
+  T.renderFbList();
+  fbCheck("fbDirty 在「没人动过」时隐藏（不得因程序自身裁剪而亮）",
+    nodes["fbDirty"].style.display === "none",
+    `display="${nodes["fbDirty"].style.display}"`);
+  const touched = JSON.parse(j(LIVE_FB));
+  touched[0].to.push("traework/deepseek-v4.1-flash"); // 用户手动加一个跨场景备胎（合法）
+  T.__setFbRules(touched);
+  T.renderFbList();
+  fbCheck("fbDirty 在用户真改动后亮起（收窄语义不得反向失效）",
+    nodes["fbDirty"].style.display === "",
+    `display="${nodes["fbDirty"].style.display}"`);
+
+  // 3) 渲染对**自环**数据同样只读：拦截属于保存/输入路径，不属于渲染
+  const loopRules = [{ from: "qwenwork/flash", to: ["qwenwork/flash", "traecode/deepseek-v4.1-flash"] }];
+  T.__setServerFb(loopRules);
+  T.__setFbRules(loopRules);
+  T.renderFbList();
+  fbCheck("渲染对含自环的数据也不改（自环拦截不得靠渲染期删数据实现）",
+    j(T.__getFbRules()) === j(loopRules), j(T.__getFbRules()));
+
+  // 4) 自环必须被拦且**给出可辨识文案**（而非静默删）
+  const loops = T.fbSelfLoops(LIVE_FB.concat(loopRules));
+  fbCheck("fbSelfLoops 精确报出自环项（只报自环，不报互备）",
+    Array.isArray(loops) && loops.length === 1 && loops[0].from === "qwenwork/flash",
+    j(loops));
+  T.__setFbRules(loopRules);
+  const guardMsg = T.fbSaveGuard();
+  fbCheck("保存前自环被拦并给出文案（点名主模型与自环备胎）",
+    typeof guardMsg === "string" && guardMsg.includes("qwenwork/flash") && /自己|自环/.test(guardMsg),
+    String(guardMsg));
+
+  // 5) 保存载荷：不得跨规则删互备项（这是 G1 的最后一道口子——落盘即永久的）
+  T.__setFbRules(LIVE_FB);
+  const payload = T.fbSavePayload();
+  fbCheck("保存载荷保留全部互备项（11 项原序，逐字节等于现役配置）",
+    payload && payload.err === null && j(payload.rules) === j(LIVE_FB),
+    j(payload));
+  T.__setFbRules(loopRules);
+  const badPayload = T.fbSavePayload();
+  fbCheck("保存载荷对自环返回 err 且不给可落盘的 rules（不留部分写入）",
+    badPayload && typeof badPayload.err === "string" && badPayload.rules === null,
+    j(badPayload));
+  for (const [label, pass, extra] of fbNeed) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
     if (!pass) failed++;
   }
 }
