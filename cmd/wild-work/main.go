@@ -556,6 +556,16 @@ func main() {
 	// CheckinMinutes 用全局签到时间；KeepaliveHours 用配置保活时段（临时凭据约 2h 到期）。
 	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
+	// doubao / doubaowork：每日签到领额度（`POST /alice/ug/campaign/landing/checkin`，见
+	// internal/doubaocdp/checkin.go）。早先按「未见签到动作」不给调度器，2026-10-27 实测推翻。
+	//
+	// **KeepaliveHours 必须显式空切片**（R39）：保活会发一条**真实对话**，既污染客户端会话列表、
+	// 又真花额度，而这两条渠道没有任何需要续期的 token（凭据在客户端浏览器里）。
+	// 签到是**账号级**活动：两渠道打同一个端点，上游 idempotent，多一次调用不会重复发放。
+	dbChatSch := scheduler.New(scheduler.Config{Pool: dbChatPool, Upstream: dbChatUp, Name: "doubao",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
+	dbWorkSch := scheduler.New(scheduler.Config{Pool: dbWorkPool, Upstream: dbWorkUp, Name: "doubaowork",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
@@ -666,10 +676,9 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
-		// doubao（普通对话）：**不给 Scheduler** —— 查遍客户端 UI 与 /alice/ 端点没有「签到领额度」
-		// 这一动作，额度形态是窗口限流自动重置 + 活动赠送额度（R39：[]int{} = 本渠道无此定时任务）。
-		provider.Doubao:    {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp},
-		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp},
+		// doubao（普通对话）：已接每日签到（landing/checkin），调度器只排签到、不排保活。
+		provider.Doubao:     {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp, Scheduler: dbChatSch},
+		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp, Scheduler: dbWorkSch},
 		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
 		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
 		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
@@ -712,6 +721,11 @@ func main() {
 	rcSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("raccoon", uid, ok, msg) })
 	oaSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("officeace", r) })
 	oaSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("officeace", uid, ok, msg) })
+	// 豆包系：签到结果同样要过观察者 —— 面板「签到成功/失败」标签与 stats 的签到收入都读它。
+	dbChatSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubao", r) })
+	dbChatSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubao", uid, ok, msg) })
+	dbWorkSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubaowork", r) })
+	dbWorkSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubaowork", uid, ok, msg) })
 
 	// HTTP handler：OpenAI 端点 + Web UI + 管理 API
 	sub, err := fs.Sub(webFS, "web")
@@ -841,6 +855,11 @@ func main() {
 	go clSch.Run(sctx)
 	// OfficeAce 的 Run 不可漏（R34）：本渠道有签到与保活。
 	go oaSch.Run(sctx)
+	// 豆包 / 豆包工作的 Run 不可漏（R34）：两渠道现有每日签到（无保活）。
+	// 漏了不会报错，只会「签到按钮点了没反应 + 定时任务静默不跑」——
+	// 正是 scheduler_start_test 守护的那类缺陷。
+	go dbChatSch.Run(sctx)
+	go dbWorkSch.Run(sctx)
 	// kilo 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
 	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
 	go kiSch.Run(sctx)

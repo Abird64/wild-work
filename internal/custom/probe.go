@@ -272,11 +272,11 @@ func effortList(m map[string]any, keys []string) []string {
 // （OpenRouter 式扩展字段本就在同一条 /models 响应里，没有第二个请求的必要）。
 // 需要同时嗅探候选根时用 Discover（请求数仍然封在 6 次以内，见那里的注释）。
 func (c *Client) TestConnection() ([]ModelCap, error) {
-	caps, _, err := probeModelsAt(strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.APIKey)
+	caps, _, err := probeModelsAt(strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.Auth, c.cfg.APIKey)
 	return caps, err
 }
 
-// getAt 发一个带 Bearer 的 GET。返回 (body, status, err)，status==0 只在传输层失败（DNS/连接/超时）时为 0。
+// getAt 发一个带鉴权头的 GET。返回 (body, status, err)，status==0 只在传输层失败（DNS/连接/超时）时为 0。
 //
 // 上限 8 MiB（R122）：早先限 1 MiB，而 OpenRouter 这类大目录上游的 /models 响应实测 3~4 MiB，
 // 截断后 json.Unmarshal 必报「不是合法 JSON」⇒「点导入模型不是每次都能列出列表」的真凶。
@@ -288,13 +288,13 @@ const (
 	probeTimeout = 45 * time.Second
 )
 
-func getAt(u, key string) ([]byte, int, error) {
+func getAt(u string, mode AuthMode, key string) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, 0, err
 	}
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if h := authHeader(mode, key); h != "" {
+		req.Header.Set("Authorization", h)
 	}
 	hc := &http.Client{Timeout: probeTimeout}
 	resp, err := hc.Do(req)
@@ -314,8 +314,8 @@ func getAt(u, key string) ([]byte, int, error) {
 
 // probeModelsAt GET {base}/models。只有 200 且解出至少一个带 id 的条目才算成功；
 // 「200 但解不出条目」也归失败（网关把未知路径兜到首页时就是这形状）。
-func probeModelsAt(base, key string) ([]ModelCap, int, error) {
-	raw, status, err := getAt(base+"/models", key)
+func probeModelsAt(base string, mode AuthMode, key string) ([]ModelCap, int, error) {
+	raw, status, err := getAt(base+"/models", mode, key)
 	if err != nil {
 		return nil, status, err
 	}
@@ -332,8 +332,8 @@ func probeModelsAt(base, key string) ([]ModelCap, int, error) {
 // probeChatAt GET {base}/chat/completions，只问「这条路径存在吗」，**绝不发 POST**
 // （POST 到对话端点会产生真实调用与费用，嗅探阶段无权花用户的钱）。
 // GET 打在 POST-only 路由上，网关一般回 405/400/415，路径不存在才回 404。
-func probeChatAt(base, key string) (int, []byte, error) {
-	body, status, err := getAt(base+"/chat/completions", key)
+func probeChatAt(base string, mode AuthMode, key string) (int, []byte, error) {
+	body, status, err := getAt(base+"/chat/completions", mode, key)
 	return status, body, err
 }
 
@@ -428,7 +428,7 @@ func Discover(cfg ChannelConfig) (*Discovery, error) {
 
 	// ① 用模型目录定位根
 	for _, b := range cands {
-		caps, status, err := probeModelsAt(b, cfg.APIKey)
+		caps, status, err := probeModelsAt(b, cfg.Auth, cfg.APIKey)
 		rec(b+"/models", status, err)
 		if !hit(status) {
 			continue
@@ -442,7 +442,7 @@ func Discover(cfg ChannelConfig) (*Discovery, error) {
 	//（401/403 也在那里判掉），这里只额外记一份「见过鉴权被拒」用于结论措辞。
 	if !d.ModelsOK {
 		for _, b := range cands {
-			status, body, err := probeChatAt(b, cfg.APIKey)
+			status, body, err := probeChatAt(b, cfg.Auth, cfg.APIKey)
 			rec(b+"/chat/completions", status, err)
 			authBlocked(status)
 			if err != nil || !chatConfirmed(status, body) {
@@ -461,7 +461,7 @@ func Discover(cfg ChannelConfig) (*Discovery, error) {
 	}
 	// ③ 目录命中时也补一次对话端点确认（目录与对话分家挂在不同前缀下的网关并不罕见）
 	if d.ModelsOK {
-		status, body, err := probeChatAt(d.Base, cfg.APIKey)
+		status, body, err := probeChatAt(d.Base, cfg.Auth, cfg.APIKey)
 		rec(d.Base+"/chat/completions", status, err)
 		d.ChatOK = err == nil && chatConfirmed(status, body)
 		switch {

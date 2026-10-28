@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -209,16 +210,45 @@ func (c *Client) UserResourceDetail(_ *auth.Auth) (int64, []provider.ResourceIte
 	return remain, items, nil
 }
 
-// DailyCheckin 签到。
+// DailyCheckin 每日签到领额度（满足 provider.Upstream 的最小接口）。
+func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := c.DailyCheckinReport(a)
+	return err
+}
+
+// DailyCheckinReport 结构化上报签到结果（provider.CheckinReporter）。
 //
-// ⚠️ 未实现：走访查遍客户端 UI 与 `/alice/` 端点后，**没有找到「签到领额度」
-// 这一动作的证据**。豆包的额度发放形态是「窗口限流自动重置 + 活动赠送额度」
-// （incentive_quota_section），不存在其它渠道那种主动签到接口。
-// 按 AGENTS.md §0.1「宁可结论标注未实证，也不要拿账号去试」，这里不猜测端点、
-// 不伪造调用，直接返回可辨识的「该渠道无签到」错误，让调度器把它当作
-// 「本渠道无此类定时任务」（R39 的 []int{} 语义），而不是每轮刷一次失败。
-func (c *Client) DailyCheckin(_ *auth.Auth) error {
-	return fmt.Errorf("doubao 渠道无签到活动（额度为窗口限流 + 活动赠送，无主动签到接口）")
+// 为什么不能只用 DailyCheckin 的 error 通道：上游对「今天已经领过」返回 code=0 +
+// idempotent=true，那不是错误；但如果一律报成功，面板就分不清「刚领到 +200」与
+// 「今天早就领过了」，ledger 也会把重放当成一次新发放（重复记账）。结构化上报把
+// claimed / already_claimed 与本次发放额分开，调度器据此决定是否记 earn。
+func (c *Client) DailyCheckinReport(_ *auth.Auth) (provider.CheckinReport, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	conn, err := c.dialPage(ctx)
+	if err != nil {
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
+	}
+	defer conn.Close()
+	res, err := doubaocdp.Checkin(ctx, conn)
+	if err != nil {
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
+	}
+	if res.Idempotent {
+		log.Printf("doubao checkin status=%s 日期=%s 连续=%d 天（未重复发放）",
+			provider.CheckinAlready, res.CheckinDate, res.ContinuousDays)
+		return provider.CheckinReport{
+			Status: provider.CheckinAlready,
+			Msg:    fmt.Sprintf("今日已领过（连续 %d 天）", res.ContinuousDays),
+		}, nil
+	}
+	log.Printf("doubao checkin status=%s +%d %s 日期=%s 连续=%d 天",
+		provider.CheckinClaimed, res.RewardAmount, res.RewardCode, res.CheckinDate, res.ContinuousDays)
+	return provider.CheckinReport{
+		Status: provider.CheckinClaimed,
+		Amount: int64(res.RewardAmount),
+		Msg:    fmt.Sprintf("签到成功 +%d 额度（连续 %d 天）", res.RewardAmount, res.ContinuousDays),
+	}, nil
 }
 
 // Classify 把上游错误文案映射成 ErrKind。

@@ -2524,6 +2524,7 @@ function renderCustomChList() {
           <span class="cm-url" title="${esc(c.base_url)}">${esc(c.base_url)}</span>
           <span class="cm-key hint" data-ch-name="${esc(c.name)}" style="cursor:pointer"
             title="点击复制完整 api-key（此时才向后端取明文）">[${esc(keyMask)}]</span>
+          ${c.auth === "basic" ? '<span class="cm-meta" title="鉴权方式：Authorization: Basic base64(api_key)">Basic</span>' : ""}
           <span class="cm-meta">${models.length} 个模型</span>
         </div>
         <button class="btn small cm-btn-edit" data-edit-custom="${i}">编辑</button>
@@ -2704,6 +2705,8 @@ function openChannelEditor(idx) {
   // 弹确认告知，并由后端级联 config 引用 / 隔离旧 state 快照。
   $("ceName").disabled = false;
   $("ceURL").value = ch ? ch.base_url : "";
+  $("ceAuth").value = ch && ch.auth === "basic" ? "basic" : "";
+  syncCeKeyHint();
   $("ceKey").value = ch ? (ch.api_key || "") : "";
   $("ceKey").type = "password"; // 明文不默认展开，眼睛点一下才取
   ceKeyPlain = "";
@@ -2711,6 +2714,14 @@ function openChannelEditor(idx) {
   setCeHint("");
   $("channelEditorOverlay").classList.remove("hidden");
   setTimeout(() => (ch ? $("ceURL") : $("ceName")).focus(), 50);
+}
+
+// syncCeKeyHint 按当前鉴权方式改写 API Key 输入框的占位提示。
+// basic 时必须指用户去填 `app_key:app_secret`：只提示「填密钥」会得到一串被 base64 后
+// 上游回 APIG.1009 的无效凭据，而那个错误文案完全看不出是「少了冒号」。
+function syncCeKeyHint() {
+  const basic = $("ceAuth").value === "basic";
+  $("ceKey").placeholder = basic ? "app_key:app_secret" : "可选；留空表示无鉴权";
 }
 
 function closeChannelEditor() {
@@ -2817,7 +2828,7 @@ async function sniffInto(target, setHint) {
 
 // sniffFromEditor 渠道编辑器里的「🔍 识别端点」：把确认后的根回填进输入框（所见即所存）。
 async function sniffFromEditor() {
-  const t = { name: $("ceName").value.trim().toLowerCase(), base_url: stripQuotes($("ceURL").value), api_key: $("ceKey").value.trim() };
+  const t = { name: $("ceName").value.trim().toLowerCase(), base_url: stripQuotes($("ceURL").value), api_key: $("ceKey").value.trim(), auth: $("ceAuth").value };
   const res = await sniffInto(t, setCeHint);
   if (res && t.base_url) $("ceURL").value = t.base_url;
   return res;
@@ -2827,6 +2838,7 @@ function saveChannelEditor() {
   const name = $("ceName").value.trim().toLowerCase();
   const url = stripQuotes($("ceURL").value);
   const key = ceKeyPlain || $("ceKey").value.trim(); // 眼睛取回的明文以它为准（R122）
+  const auth = $("ceAuth").value === "basic" ? "basic" : "";
   const fail = (m) => { $("ceErr").textContent = m; };
   if (!name) return fail("请填入渠道标识");
   if (!/^[a-zA-Z0-9_\-]+$/.test(name)) return fail("渠道标识仅允许字母、数字、下划线、短横线");
@@ -2835,15 +2847,19 @@ function saveChannelEditor() {
   // 不再硬性要求 https:// 开头（R121）：本地 one-api 常常是 http://127.0.0.1:11434/v1，
   // 用户从文档里复制的又多是带尾巴的完整地址，交给后端规范化比在这里拦人更合适。
   if (!looksLikeEndpoint(url)) return fail("Base URL 不像合法地址（形如 api.example.com/v1 或 https://…）");
+  // basic 形态的 key 是 app_key:app_secret：前端的即时校验与后端 Validate 同一口径，
+  // 免得用户点「保存」才被后端回一句错误（后端仍会再校验一次，两边不能只靠一边）。
+  if (auth === "basic" && key && !key.includes(":")) return fail("鉴权方式为 Basic 时 API Key 需填 app_key:app_secret（缺少冒号）");
   if (editChIdx >= 0) {
     const ch = editCustomChannels[editChIdx];
     if (name !== ch.name && editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
-    const changed = ch.base_url !== url || (ch.api_key || "") !== key;
+    const changed = ch.base_url !== url || (ch.api_key || "") !== key || (ch.auth || "") !== auth;
     const renamed = name !== ch.name;
     // 改名要用户自己知情：历史流水留在旧名、旧前缀请求立即 400（本工具不做 alias）。
     if (renamed && !confirm(`把渠道标识 ${ch.name} 改为 ${name}？\n\n· 以 ${ch.name}/ 开头的模型 ID 需改成 ${name}/…（旧前缀会报 unknown channel）\n· 历史用量/积分流水仍记在 ${ch.name} 下，不会跟着改`)) return;
     if (renamed) pendingRenames.push({ new: name, old: ch.name });
     Object.assign(ch, { name, base_url: url, api_key: key });
+    if (auth) ch.auth = auth; else delete ch.auth;
     closeChannelEditor();
     renderCustomChList();
     $("customChOk").textContent = renamed ? `已改名为 ${name}，点「保存全部配置」生效` : "已更新，点击「保存全部配置」生效";
@@ -2855,7 +2871,9 @@ function saveChannelEditor() {
   if (editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
   // enabled 字段后端已废弃（R83 移除「停用」概念），不再写这个死字段。
   const idx = editCustomChannels.length;
-  editCustomChannels.push({ name, base_url: url, api_key: key, models: [] });
+  const fresh = { name, base_url: url, api_key: key, models: [] };
+  if (auth) fresh.auth = auth; // 只在 basic 时落字段：bearer 是默认，不往配置里塞无效噪音
+  editCustomChannels.push(fresh);
   closeChannelEditor();
   renderCustomChList();
   $("customChErr").textContent = "";
@@ -3727,6 +3745,8 @@ function bind() {
   $("btnCeCancel").onclick = () => closeChannelEditor();
   $("btnCeSniff").onclick = () => sniffFromEditor(); // R121：规范化 + 确认真实端点，结论回填输入框
   $("btnCeSave").onclick = () => saveChannelEditor();
+  // 切鉴权方式时改占位提示（basic 要 app_key:app_secret，bearer 才是「可选」）
+  $("ceAuth").onchange = () => syncCeKeyHint();
   $("channelEditorOverlay").onclick = (e) => { if (e.target === $("channelEditorOverlay")) closeChannelEditor(); };
   $("ceURL").onkeydown = (e) => { if (e.key === "Enter") saveChannelEditor(); };
 

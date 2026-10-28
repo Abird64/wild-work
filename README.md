@@ -493,7 +493,11 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 - **积分明细**：鼠标悬停积分数字显示套餐明细（含有效期与可用/不可用小计），条目多时用底部 `‹ ›` 翻页
 - **刷新积分**：面板顶部按钮，批量刷新全部账号余额
 - **模型列表和费率**（第四 tab）：点击「刷新」从上游拉取最新模型定价；上游未返回定价的模型显示 `unknown`，免费模型高亮为 `Free`
-- **自定义渠道（任意 OpenAI 兼容 API）**：主面板「＋ 渠道」或渠道行的「编辑」弹窗里填 *渠道标识 / 接入点 / API Key* 即可接入：
+- **自定义渠道（任意 OpenAI 兼容 API）**：主面板「＋ 渠道」或渠道行的「编辑」弹窗里填 *渠道标识 / 接入点 / 鉴权方式 / API Key* 即可接入：
+  - **鉴权方式**有两档：`Bearer`（默认，OpenAI 兼容的绝大多数上游）与 `Basic`（华为云 APIG 系网关，如 OfficeAce 的 `modelgw`）。
+    选 `Basic` 时 API Key 填 **`app_key:app_secret`**（`Authorization: Basic base64(...)`）；选错形态会被上游回一句
+    `APIG.0303 Authorization header is missing` 或 `APIG.1009 AppKey or AppSecret is invalid`，两种报错都看不出是形态问题，
+    因此面板与后端**两处都校验**「Basic 的 key 必须有冒号」。
   - 接入点**可以随便粘**——带 `/chat/completions`、`/completions`、`/models` 尾巴，或漏了 `http(s)://`，保存时都会被规范化成 API 根
     （内网地址默认 `http`，公网默认 `https`）；`🔍 识别端点` 会在候选根里做**有界嗅探**（最多 3 个根，只 GET 不 POST）确认真实端点，
     并把结果回填输入框；定位失败会**逐条列出试过哪几个地址、各回什么**，不是一句「连接失败」。

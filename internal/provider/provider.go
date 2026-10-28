@@ -79,8 +79,9 @@ const (
 	//     不存任何 token（比 R0.2「零 token 落盘」更彻底）；
 	//  ② **单账号**：一个客户端 = 一个登录态，不存在账号池轮换 ⇒ 置 SingleAccount，
 	//     任何账号级惩罚都等于整条渠道下线，故不罚号、原文透传；
-	//  ③ **无签到**：走访客户端 UI 与 /alice/ 端点未见「签到领额度」动作，额度形态是
-	//     窗口限流自动重置 + 活动赠送，故调度器不给本渠道排签到任务（R39 的 []int{}）。
+	//  ③ **有签到**（2026-10-27 实测修正）：侧栏「今日签到领 200 额度 → 立即签到」对应
+	//     `POST /alice/ug/campaign/landing/checkin`，响应带 `idempotent`（重复调用不重复发）。
+	//     早先「未见签到动作」的结论已被截图 + 抓包推翻，详见 internal/doubaocdp/checkin.go。
 	//
 	// ⚠️ **范围边界（易错）**：本渠道只覆盖普通对话。侧栏「新工作任务」是另一个
 	// 产品形态（`/im/conversation/modify` 的 `conversation_type=3` + `model_item_key`

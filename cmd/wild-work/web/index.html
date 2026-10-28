@@ -567,6 +567,13 @@
         <input id="ceName" class="input grow" placeholder="如 stepfun（字母/数字/下划线/短横线）" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">Base URL</label>
         <input id="ceURL" class="input grow" placeholder="如 https://api.stepfun.com/step_plan/v1" spellcheck="false"></div>
+      <!-- 鉴权方式：OpenAI 兼容只管路径与请求体形状，鉴权头各家不同。华为云 APIG 系网关
+           （如 OfficeAce 的 modelgw）只认 Basic base64(appKey:appSecret)，发 Bearer 回 APIG.0303。 -->
+      <div class="cfg-row"><label class="cfg-label">鉴权方式</label>
+        <select id="ceAuth" class="input grow">
+          <option value="">Bearer（默认，OpenAI 兼容绝大多数）</option>
+          <option value="basic">Basic（华为云 APIG 系网关）</option>
+        </select></div>
       <div class="cfg-row"><label class="cfg-label">API Key</label>
         <div class="row" style="display:flex;gap:6px;align-items:center;flex:1">
           <input id="ceKey" class="input grow" type="password" placeholder="可选；留空表示无鉴权" spellcheck="false">

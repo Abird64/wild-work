@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -99,9 +100,43 @@ func (c *Client) FetchModelPricing(_ *auth.Auth) ([]provider.ModelPricing, error
 // RefreshToken 无需刷新：凭据在客户端浏览器里。
 func (c *Client) RefreshToken(_ *auth.Auth) error { return nil }
 
-// DailyCheckin 无签到（见 provider.Doubaowork 注释）。
-func (c *Client) DailyCheckin(_ *auth.Auth) error {
-	return fmt.Errorf("doubaowork 渠道无签到活动（额度为窗口限流 + 活动赠送）")
+// DailyCheckin 每日签到领额度（签到是**账号级**活动，与 internal/doubao 打同一端点）。
+func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := c.DailyCheckinReport(a)
+	return err
+}
+
+// DailyCheckinReport 结构化上报签到结果（provider.CheckinReporter）。
+//
+// 与 internal/doubao 的实现同源（doubaocdp.Checkin），区别只在日志里的渠道名：
+// 两个渠道共享同一个客户端与同一份账号额度，签到一次两边都算完成。
+func (c *Client) DailyCheckinReport(_ *auth.Auth) (provider.CheckinReport, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	conn, err := c.dialPage(ctx)
+	if err != nil {
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
+	}
+	defer conn.Close()
+	res, err := doubaocdp.Checkin(ctx, conn)
+	if err != nil {
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
+	}
+	if res.Idempotent {
+		log.Printf("doubaowork checkin status=%s 日期=%s 连续=%d 天（未重复发放）",
+			provider.CheckinAlready, res.CheckinDate, res.ContinuousDays)
+		return provider.CheckinReport{
+			Status: provider.CheckinAlready,
+			Msg:    fmt.Sprintf("今日已领过（连续 %d 天）", res.ContinuousDays),
+		}, nil
+	}
+	log.Printf("doubaowork checkin status=%s +%d %s 日期=%s 连续=%d 天",
+		provider.CheckinClaimed, res.RewardAmount, res.RewardCode, res.CheckinDate, res.ContinuousDays)
+	return provider.CheckinReport{
+		Status: provider.CheckinClaimed,
+		Amount: int64(res.RewardAmount),
+		Msg:    fmt.Sprintf("签到成功 +%d 额度（连续 %d 天）", res.RewardAmount, res.ContinuousDays),
+	}, nil
 }
 
 // dialPage 找对话页并建一条独立 CDP 连接。

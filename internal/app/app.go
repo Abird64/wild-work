@@ -138,6 +138,12 @@ type App struct {
 
 	muOALogin sync.Mutex
 	oaLogin   *officeace.LoginSession
+	// oaStarting 表示「已通过入口检查、正在向云端申请 state」的瞬间窗口。
+	//
+	// 为什么需要它：StartLogin 里的 fetchState 是真实 HTTP，**不能**在 muOALogin 持有期间调用
+	// （实测约 1s，期间所有状态轮询全部阻塞）。锁内只留状态变更，就必须另用一个占位标记
+	// 防「用户双击/两次请求并发起两条流程」——那是原来靠长持锁顺带解决的问题。
+	oaStarting bool
 
 	// auth 管理面板会话（cookie）；详见 session.go
 	auth *authState
@@ -1710,6 +1716,7 @@ func (a *App) CancelGLMAutoLogin() error {
 // 必须**先清空再解锁**，否则并发的状态轮询会读到上一轮的 done/failed，把用户新点的
 // 「新增账号」直接顶成旧终态（表现为「点了没反应」）。
 func (a *App) StartOfficeAceLogin() (string, error) {
+	// ① 短临界区：判定是否已有进行中的会话，并占住「正在发起」位。
 	a.muOALogin.Lock()
 	if a.oaLogin != nil {
 		if st, _ := a.oaLogin.Status(); oaLoginActive(st) {
@@ -1721,21 +1728,40 @@ func (a *App) StartOfficeAceLogin() (string, error) {
 		// 刻意在上锁期间清空 —— 否则并发的 GetOfficeAceLoginStatus 会读到旧会话。
 		a.oaLogin = nil
 	}
-	sess, err := officeace.StartLogin(a.cfg.AuthDir, func(r officeace.LoginResult) {
+	if a.oaStarting {
+		a.muOALogin.Unlock()
+		return "", errors.New("OfficeAce 登录正在发起中，请稍候")
+	}
+	a.oaStarting = true
+	a.muOALogin.Unlock()
+
+	// ② 网络部分必须在锁外：StartLogin 先要向云端申请 state（实测约 1s），持锁调用会把
+	// 并发到达的状态轮询全部卡住。
+	sess, err := officeAceStartLogin(a.cfg.AuthDir, func(r officeace.LoginResult) {
 		a.reloadAccounts()
 		a.afterAccountAdded(provider.OfficeAce)
 		log.Printf("officeace 自助登录完成，账号池已重载 uid=%s", r.UID)
 	})
+
+	// ③ 收尾临界区：无论成败都要清占位并释放（历史缺陷正是成功路径漏了解锁）。
+	a.muOALogin.Lock()
+	a.oaStarting = false
+	if err == nil {
+		a.oaLogin = sess
+	}
+	a.muOALogin.Unlock()
 	if err != nil {
-		a.muOALogin.Unlock()
 		return "", err
 	}
-	a.oaLogin = sess
 	// 不在服务端开浏览器：授权页由前端 window.open 在「用户正在使用的设备」打开
 	//（捕获走云端轮询 state→code，与授权页在哪台设备打开无关；服务端弹窗对
-	// 局域网用户不可见，反而造成「点了没反应」的困惑）。前端有复制链接兜底。
+	// 局域网用户不可见，反而造成「点了没反应」的困惑。前端有复制链接兜底。
 	return sess.URL(), nil
 }
+
+// officeAceStartLogin 是 officeace.StartLogin 的注入点：真实实现要打华为云，单测无法走完；
+// 用零值 *officeace.LoginSession 替身即可验证「成功返回后 muOALogin 必须已释放」这个不变量。
+var officeAceStartLogin = officeace.StartLogin
 
 // GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。
 // GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。

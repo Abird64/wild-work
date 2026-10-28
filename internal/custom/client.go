@@ -3,6 +3,7 @@ package custom
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -15,6 +16,24 @@ import (
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
 )
+
+// authHeader 按渠道声明的鉴权方式拼 Authorization 头值（空串 = 不设头）。
+//
+// 单一入口：client.go 的对话/请求与 probe.go 的探测必须走同一个函数，否则
+// 「探测通过、真调用 401」这类分叉会重现（同 R108 「探针没走同一条链路」的教训）。
+//
+// Basic 形态的语义：api_key 是 `app_key:app_secret`，按原样 base64 后发 `Basic …`。
+// 这里**按第一个冒号切分不做任何校验**（app_secret 自身可能含冒号，原样编码才是对的）；
+// 冒号缺失时的拦阻在 ChannelConfig.Validate 里（用户能看懂的地方报错）。
+func authHeader(mode AuthMode, key string) string {
+	if key == "" {
+		return ""
+	}
+	if mode == AuthBasic {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(key))
+	}
+	return "Bearer " + key
+}
 
 // 超时三兄弟的默认值与下限（R110）。
 //
@@ -144,8 +163,8 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	if h := authHeader(c.cfg.Auth, c.cfg.APIKey); h != "" {
+		req.Header.Set("Authorization", h)
 	}
 
 	var peek struct {

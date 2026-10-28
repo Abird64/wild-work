@@ -173,11 +173,29 @@ func decodeTokenAmount(raw json.RawMessage) (int64, error) {
 	return ParseTokens(v)
 }
 
+// AuthMode 自定义渠道的鉴权方式。
+//
+// 为什么要有它：OpenAI 兼容只规定「路径与请求体形状」，鉴权头并不统一。绝大多数上游吃
+// `Authorization: Bearer <key>`，但华为云 APIG 系网关（如 OfficeAce 的模型网关）只认
+// `Authorization: Basic base64(appKey:appSecret)`，发 Bearer 会回 APIG.0303「Authorization
+// header is missing」。旧版把 Bearer 写死，这类上游因此根本无法作为自定义渠道接入。
+// 这里只放**两种已实证的形态**，不做「自动探测鉴权方式」（探测等于拿用户的凭据去试错，
+// 且 401 分不清是密钥错还是形态错，猜错了只会给出误导性结论）。
+type AuthMode string
+
+const (
+	// AuthBearer 默认：`Authorization: Bearer <api_key>`（OpenAI 及绝大多数兼容上游）。
+	AuthBearer AuthMode = "bearer"
+	// AuthBasic 华为云 APIG 系网关：api_key 填 `<app_key>:<app_secret>`，发 `Basic base64(...)`。
+	AuthBasic AuthMode = "basic"
+)
+
 // ChannelConfig 自定义 OpenAI 兼容渠道配置。
 type ChannelConfig struct {
 	Name    string        `json:"name"`              // 渠道标识/模型前缀，如 "stepfun", "proxycli", "cliproxy"
 	BaseURL string        `json:"base_url"`          // API 基础地址，如 "https://api.stepfun.com/step_plan/v1"
 	APIKey  string        `json:"api_key,omitempty"` // API 密钥（可选）
+	Auth    AuthMode      `json:"auth,omitempty"`    // 鉴权方式：留空 = AuthBearer（旧配置零迁移）
 	Models  []ModelConfig `json:"models,omitempty"`  // 用户配置的模型列表（配什么，/v1/models 就返回什么）
 	// R83 起移除 `enabled` 字段：渠道要么在列表里（启用），要么被删除，
 	// 「停用但保留配置」这个中间态既少用又让面板多一个按钮和一层视觉噪音。
@@ -191,6 +209,14 @@ func (c *ChannelConfig) Validate() error {
 	// /chat/completions 尾巴要剥。手改 config.json 也会经过这里（config.Normalize 逐渠道调 Validate）。
 	c.BaseURL = NormalizeBaseURL(c.BaseURL)
 	c.APIKey = strings.TrimSpace(c.APIKey)
+	// 鉴权方式只有两个合法值；缺失/写错的一律归 Bearer（旧配置与手改 config.json 都安全）。
+	// 空串是**有意**归一成显式 bearer：落盘值只留 "" 与 "basic" 两种，前端读到的形态唯一。
+	switch AuthMode(strings.TrimSpace(string(c.Auth))) {
+	case AuthBasic:
+		c.Auth = AuthBasic
+	default:
+		c.Auth = ""
+	}
 
 	if c.Name == "" {
 		return fmt.Errorf("channel name cannot be empty")
@@ -205,6 +231,11 @@ func (c *ChannelConfig) Validate() error {
 	}
 	if c.BaseURL == "" {
 		return fmt.Errorf("channel %s: base_url cannot be empty", c.Name)
+	}
+	if c.Auth == AuthBasic && !strings.Contains(c.APIKey, ":") {
+		// Basic 形态的密钥必须是 `app_key:app_secret`。缺冒号时 base64 后仍会发出去，
+		// 上游只会回一句「AppKey or AppSecret is invalid」，用户看不出是自己少写了冒号。
+		return fmt.Errorf("channel %s: 鉴权方式为 basic 时 api_key 需填 app_key:app_secret（缺少冒号）", c.Name)
 	}
 	u, err := url.Parse(c.BaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

@@ -1470,7 +1470,7 @@ for (const [label, re] of uniq) {
   check5("列表/费率载荷里的 key 不得当 title 明文悬浮显示（R119）",
     !/title="\$\{esc\(c\.api_key\)\}"/.test(raw));
   check5("新建渠道后自动拉一次上游模型（R119：endpoint+key 填完即可勾选）",
-    /editCustomChannels\.push\(\{ name, base_url: url, api_key: key, models: \[\] \}\)[\s\S]{0,600}?openModelPick\(idx, "api"\)/.test(raw));
+    /editCustomChannels\.push\([\s\S]{0,300}?\)[\s\S]{0,600}?openModelPick\(idx, "api"\)/.test(raw));
   check5("费率页上下文/能力措辞按来源区分（R119：手填/实测不冒充上游）",
     /CAP_SRC_TEXT/.test(raw) && raw.includes("面板手填值") && raw.includes("上游接口返回"));
   // R121：接入点规范化 + 端点定位。面板不得自己拼 /v1（只有上游能回答「哪个根是真的」），
@@ -1496,6 +1496,23 @@ for (const [label, re] of uniq) {
   check5("探测失败要列出逐条 tries 而不是只一句「连接失败」（R121）",
     /res\.tries[\s\S]{0,400}?→/.test(raw) && /function applyProbeResult/.test(raw));
   check5("渠道编辑器留了结论回显位（R121）", html.includes('id="ceHint"'));
+  // 鉴权方式（Basic / Bearer）：华为云 APIG 系网关只认 Basic base64(appKey:appSecret)，
+  // 早先写死 Bearer 让这类上游根本无法作为自定义渠道接入。三条一起守：控件存在、
+  // 探测与保存都带上 auth（漏一处就会出现「探测通过、真调用 401」），basic 时提示改。
+  check5("渠道编辑器有鉴权方式选择（AuthMode：bearer / basic）",
+    html.includes('id="ceAuth"') && html.includes('<option value="basic">') &&
+    /function syncCeKeyHint\(\)/.test(raw) && /\$\("ceAuth"\)\.onchange/.test(raw));
+  check5("探测与保存都把 auth 带进请求（不得只改 UI 不发后端）", (() => {
+    const sniff = raw.indexOf("function sniffFromEditor");
+    const save = raw.indexOf("function saveChannelEditor");
+    if (sniff < 0 || save < 0) return false;
+    return /auth: \$\("ceAuth"\)\.value/.test(raw.slice(sniff, sniff + 900)) &&
+      /\$\("ceAuth"\)\.value === "basic"/.test(raw.slice(save, save + 900));
+  })());
+  check5("basic 缺冒号在前端就拦住（与后端 Validate 同口径）", (() => {
+    const save = raw.indexOf("function saveChannelEditor");
+    return save > 0 && /includes\(":"\)/.test(raw.slice(save, save + 1600));
+  })());
   // R122：识别详情从 API Key 行里搬出来单独成行（端点结论是一长串：根 + 试过哪几个 +
   // 各回什么），和输入框同行会把框挤没。判定：ceHint 不得在 cfg-row 内部。
   check5("识别详情/错误独立成行，不挤在 API Key 行里（R122）", (() => {
