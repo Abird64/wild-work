@@ -152,6 +152,164 @@ async function refreshFees() {
 // lastFees 最近一次费率接口响应（loadFees/refreshFees 填充）；查找面板读它取全渠道模型。
 let lastFees = null;
 
+// ---------- 三场景推荐排序（SR-005a：纯函数，零 DOM / 零全局态 / 零请求） ----------
+// 规格：SR-008 §二。核心前提是「积分都是免费领的」⇒ 金钱维不进排序；
+// rate 只用于三态识别与同分裁决，不参与主排序（SD-10 已裁）。
+//
+// 四态（互斥）：FREE 零消耗 / PRICED 速率已知 / UNPRICED 消耗未知 / UNAVAILABLE 已摘出路由。
+// ⚠️ UNPRICED（priced=false && free=false）绝不可当免费处理：本刻 242 模型里 139 个属此态，
+//    若当 0 费率排前，会得到一批「最便宜」的假首选（SR-002 §5.1.1 已实证 5 个 trae 模型从非零变 0 属此态）。
+
+// 账号池归并：traework 与 traecode 共用同一个 Trae 账号（/api/state accounts 里 traecode 为 0 个）。
+// 不归并会让 traecode 判「余额 0」被整渠道排除 —— 而它是 code 场景唯一 1M 上下文的入口（SD-15 裁决）。
+const RANK_POOL = { traework: "trae", traecode: "trae" };
+// 已摘出全部路由的渠道（MS-007：workbuddy 因 11128 风险摘除）。属可用性硬门槛，不是价格判断。
+const RANK_UNROUTED = { workbuddy: true };
+
+// 场景权重（SR-008 §2.4）。W = 额度维：余额越多越该用（0.75）＋ 快到期的额外加分（0.25）。
+const RANK_WEIGHTS = {
+  fast:    { P: 0.60, C: 0,    W: 0.40 },
+  code:    { P: 0.35, C: 0.45, W: 0.20 },
+  complex: { P: 0.30, C: 0.50, W: 0.20 },
+};
+
+function rankPoolOf(ch) { return RANK_POOL[ch] || ch; }
+
+function rankNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// rankCandidates 纯函数：输入 fees/stats（GET 响应）、scene、candidatesData（SR-002 JSON），
+// 输出有序数组。不读 DOM、不读 state、不发请求、不改入参（内部只读）。
+function rankCandidates(fees, stats, scene, candidatesData) {
+  const w = RANK_WEIGHTS[scene];
+  if (!w) return [];
+
+  // --- 索引活值 ---
+  const feeById = {};
+  for (const ch of (fees && fees.channels) || []) {
+    for (const m of ch.models || []) {
+      const id = m.id || (ch.channel + "/" + m.model);
+      feeById[id] = m;
+    }
+  }
+  const statByModel = {};
+  for (const sm of (stats && stats.models) || []) if (sm.model) statByModel[sm.model] = sm;
+
+  // --- 账号池余额（先归并，再归一） ---
+  const poolBal = {}, poolExp = {};
+  for (const p of (stats && stats.platforms) || []) {
+    const pool = rankPoolOf(p.group);
+    poolBal[pool] = (poolBal[pool] || 0) + (rankNum(p.credits) || 0);
+    poolExp[pool] = (poolExp[pool] || 0) + (rankNum(p.expire_7d) || 0);
+  }
+  const maxBal = Math.max(1, ...Object.values(poolBal));
+
+  // --- 候选池（来自 SR-002 数据文件，顺序不作推荐承诺） ---
+  const sc = ((candidatesData && candidatesData.scenes) || []).find((x) => x.alias === scene);
+  const poolIds = ((sc && sc.candidates) || []).map((c) => c.id).filter(Boolean);
+
+  const out = [];
+  for (const id of poolIds) {
+    const ch = id.split("/")[0];
+    const fm = feeById[id] || null;
+    const missing = [];
+    if (!fm) missing.push("fees");
+    const sm = statByModel[id] || null;
+    if (!sm) missing.push("stats");
+
+    // --- 四态判定（互斥，顺序即优先级：摘出路由 > 免费 > 已定价 > 未知） ---
+    let state;
+    if (RANK_UNROUTED[ch]) state = "UNAVAILABLE";
+    else if (fm && fm.free === true) state = "FREE";
+    else if (fm && fm.priced === true) state = "PRICED";
+    else state = "UNPRICED"; // 含「目录里查不到」——同样按未知处理，绝不当免费
+
+    if (state === "UNAVAILABLE") continue; // 可用性是硬门槛，直接排除
+
+    // --- P 性能：无足够实测 ⇒ null（不得当 0 分，也不得当满分） ---
+    let pScore = null, perf = null;
+    const samples = sm ? rankNum(sm.perf_samples) : null;
+    const ttfb = sm ? rankNum(sm.avg_ttfb_ms) : null;
+    const tps = sm ? rankNum(sm.avg_tok_per_sec) : null;
+    if (samples !== null && samples >= 10 && (ttfb !== null || tps !== null)) {
+      const pTtfb = ttfb !== null && ttfb > 0 ? Math.max(0, Math.min(1, (12000 - ttfb) / 9000)) : null;
+      const pTps = tps !== null && tps > 0 ? Math.max(0, Math.min(1, tps / 200)) : null;
+      if (pTtfb !== null && pTps !== null) pScore = pTtfb * 0.6 + pTps * 0.4;
+      else pScore = pTtfb !== null ? pTtfb : (pTps !== null ? pTps : null);
+      perf = { ttfb, tps, samples };
+    }
+    if (samples !== null && samples < 10) missing.push("perf_samples");
+
+    // --- C 能力（按场景） ---
+    const ctx = fm ? rankNum(fm.context_window) : null;
+    const tools = fm ? fm.supports_tools : null;
+    const rsn = fm ? fm.supports_reasoning : null;
+
+    let cScore = null;
+    if (scene === "code") {
+      // tools 是硬条件：未采集/未声明一律淘汰（SR-001 §2 I4 家族；MS-001 §7.2）
+      if (tools !== true) continue;
+      cScore = 0.5 + (ctx !== null && ctx >= 128000 ? 0.5 : 0);
+    } else if (scene === "complex") {
+      let acc = 0, wsum = 0;
+      if (ctx !== null) { acc += 0.6 * (ctx >= 500000 ? 1 : ctx >= 128000 ? 0.6 : 0.3); wsum += 0.6; }
+      if (rsn !== null) { acc += 0.4 * (rsn ? 1 : 0); wsum += 0.4; }
+      cScore = wsum > 0 ? acc / (0.6 + 0.4) : null;
+      if (ctx === null) missing.push("context_window");
+    } else {
+      // fast：能力只作门槛（ctx >= 128k），不进评分（否则 1M 上下文白送分）
+      cScore = ctx !== null ? (ctx >= 128000 ? 1 : 0.4) : 0.5;
+      if (ctx === null) missing.push("context_window");
+    }
+
+    // --- W 额度：余额越多越优先（用户原则）+ 到期压力 ---
+    const pool = rankPoolOf(ch);
+    const bal = poolBal[pool] || 0;
+    const exp = poolExp[pool] || 0;
+    const wScore = bal <= 0 ? 0 : 0.75 * (bal / maxBal) + 0.25 * Math.min(1, exp / bal);
+
+    // --- 覆盖惩罚（沿用 MS-001 §7.1）：只对已观测维度加权，再按观测比例折减 ---
+    const parts = [];
+    if (pScore !== null && w.P) parts.push([pScore, w.P]);
+    if (cScore !== null && w.C) parts.push([cScore, w.C]);
+    if (w.W) parts.push([wScore, w.W]);
+    if (!parts.length) continue;
+    const wAvail = parts.reduce((a, x) => a + x[1], 0);
+    const wTotal = w.P + w.C + w.W;
+    const score = (parts.reduce((a, x) => a + x[0] * x[1], 0) / wAvail) * (wAvail / wTotal);
+
+    // --- T 分级（防「渠道余额多但没测过」靠 W 维挤掉实测模型） ---
+    // T1 有实测且能力门槛满足 / T2 有实测但能力维缺失 / T3 无实测（排全部 T1/T2 之后）
+    let tier;
+    if (pScore === null) tier = 3;
+    else if (cScore === null) tier = 2;
+    else tier = 1;
+
+    out.push({
+      id, channel: ch, state, tier, score: Math.round(score * 10000) / 10000,
+      rate: fm ? fm.rate : null, free: !!(fm && fm.free), priced: !!(fm && fm.priced),
+      ctx, tools, reasoning: rsn,
+      w: Math.round(wScore * 10000) / 10000, // 额度分量（供 UI 展示与回归断言；不参与 evidence 权重）
+      evidence: null, // 由 UI 从 candidatesData 取；此处只作占位，严禁参与排序（SD-2）
+      missing,
+    });
+  }
+
+  // 排序：状态分层 → T 升序 → 分数降序 → id 升序。
+  // ⚠️ 第一键「状态分层」不是可选的：UNPRICED 的额度维可能极高（大池子），
+  //    若只按 T+分数排，它会靠 W 维挤到 PRICED 前面 —— 而它「花多少分未知」，
+  //    把它排在 PRICED 之前等于向用户承诺一个无法核实的成本（实测已抓到过）。
+  const STATE_RANK = { PRICED: 0, FREE: 1, UNPRICED: 2 };
+  out.sort((a, b) =>
+    ((STATE_RANK[a.state] ?? 3) - (STATE_RANK[b.state] ?? 3)) ||
+    (a.tier - b.tier) || (b.score - a.score) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // 同时暴露已排序快照的顺序，供 UI 直接消费（避免二次排序口径漂移）
+  return out;
+}
+
 // collectAllModels 展平全渠道模型，附带裸名/完整 ID（完整 ID = 渠道/模型，即客户端该填的名字）。
 function collectAllModels() {
   const out = [];

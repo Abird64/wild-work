@@ -188,7 +188,7 @@ const patched =
       { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
     ] },
   ] }) + ";"
-  + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees"
+  + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees, rankCandidates"
   // 积分明细浮窗：函数 + 两个模块级 let 的注入器（detailState/detailCache 是 `let`，
   // 只能在源码作用域内赋值，故由改写注入 setter 而不是靠 globalThis）。
   // ⚠️ cache 必须按 uid 建键：真实代码是 detailCache[detailState.uid]，
@@ -689,6 +689,121 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   check("模型表渲染平均速度列（无速度样本显示「—」）", (rowsHtml.match(/—/g) || []).length >= 2, rowsHtml.slice(0, 300));
   T2.renderModelTable([], 1);
   check("模型表空态占位行跨 7 列", document.getElementById("tblModelstbody").innerHTML.includes('colspan="7"'));
+}
+
+// ---- 场景 6：三场景推荐排序（SR-005a 纯函数）----
+// 规格 SR-008 §二。核心风险：把 UNPRICED（消耗未知）当免费排前、无实测模型靠额度维挤掉实测模型、
+// traecode 因无独立余额被整渠道排除、证据等级混进排序。
+{
+  // 造一份最小但含关键形态的快照：
+  //  - PRICED 有实测（traework，trae 池 4520）
+  //  - UNPRICED 无实测（codearts，11700 分大池，priced=false 且 free=false）
+  //  - FREE（kilo，0 费率）
+  //  - UNAVAILABLE（workbuddy，已摘出路由）
+  //  - traecode 同一模型（与 traework 共池，必须拿到余额）
+  const fees = { cached_at: "10-29 07:00", channels: [
+    { channel: "traework", models: [
+      { model: "deepseek-v4.1-flash", id: "traework/deepseek-v4.1-flash",
+        priced: true, free: false, rate: 0.06, context_window: 200000,
+        supports_tools: true, supports_reasoning: true } ] },
+    { channel: "traecode", models: [
+      { model: "deepseek-v4.1-flash", id: "traecode/deepseek-v4.1-flash",
+        priced: true, free: false, rate: 0.06, context_window: 1000000,
+        supports_tools: true, supports_reasoning: true } ] },
+    { channel: "codearts", models: [
+      { model: "GLM-5.2", id: "codearts/GLM-5.2",
+        priced: false, free: false, rate: 0, context_window: 202752,
+        supports_tools: false, supports_reasoning: false } ] },
+    { channel: "kilo", models: [
+      { model: "nvidia/nemotron:free", id: "kilo/nvidia/nemotron:free",
+        priced: true, free: true, rate: 0, context_window: 1000000,
+        supports_tools: true, supports_reasoning: true } ] },
+    { channel: "workbuddy", models: [
+      { model: "deepseek-v4.1-flash", id: "workbuddy/deepseek-v4.1-flash",
+        priced: true, free: false, rate: 0.11, context_window: 1000000,
+        supports_tools: true, supports_reasoning: true } ] },
+  ] };
+  const stats = {
+    models: [
+      { model: "traework/deepseek-v4.1-flash", avg_ttfb_ms: 2600, avg_tok_per_sec: 75, perf_samples: 194 },
+      { model: "workbuddy/deepseek-v4.1-flash", avg_ttfb_ms: 1600, avg_tok_per_sec: 184, perf_samples: 4 },
+    ],
+    platforms: [
+      { group: "traework", credits: 4520, expire_7d: 0 },
+      { group: "codearts", credits: 11700, expire_7d: 0 },
+      { group: "kilo", credits: 0, expire_7d: 0 },
+      { group: "workbuddy", credits: 504, expire_7d: 0 },
+    ],
+  };
+  const cands = { scenes: [
+    { alias: "fast", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" },
+                                  { id: "kilo/nvidia/nemotron:free" }, { id: "workbuddy/deepseek-v4.1-flash" },
+                                  { id: "traecode/deepseek-v4.1-flash" }] },
+    { alias: "code", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" },
+                                   { id: "workbuddy/deepseek-v4.1-flash" }, { id: "traecode/deepseek-v4.1-flash" }] },
+    { alias: "complex", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" }] },
+  ] };
+
+  const fastList = T.rankCandidates(fees, stats, "fast", cands);
+
+  check("SR-005a：UNAVAILABLE（workbuddy）不出现在结果里",
+    !fastList.some((x) => x.id.startsWith("workbuddy/")));
+
+  // UNPRICED 与 PRICED 的位置关系（核心防作弊断言）
+  const iUnpriced = fastList.findIndex((x) => x.state === "UNPRICED");
+  const lastPriced = fastList.map((x) => x.state).lastIndexOf("PRICED");
+  check("SR-005a：UNPRICED（消耗未知）不得排在 PRICED 之前",
+    iUnpriced === -1 || lastPriced === -1 || iUnpriced > lastPriced,
+    `unpriced@${iUnpriced} lastPriced@${lastPriced}`);
+
+  // T 分级单调（无实测的必须排在所有有实测的之后）
+  const tiers = fastList.map((x) => x.tier);
+  check("SR-005a：T 分级非降序（T3 无实测排最后）",
+    tiers.every((t, i) => i === 0 || t >= tiers[i - 1]), tiers.join(","));
+
+  // codearts 无实测 ⇒ 必须是 T3
+  const ca = fastList.find((x) => x.id === "codearts/GLM-5.2");
+  check("SR-005a：无性能实测的模型被标为 T3", !!ca && ca.tier === 3, ca ? `tier=${ca.tier}` : "缺失");
+
+  // 账号池归并：traecode 与 traework 必须拿到**同一个**额度分量。
+  // ⚠️ 只断言「traecode 入池」是空断言——它即便余额被算成 0 也仍在池里（只是 w=0），
+  //    实测：去掉 RANK_POOL 后该断言仍绿。必须比较 w 分量本身。
+  const codeList = T.rankCandidates(fees, stats, "code", cands);
+  const tc = codeList.find((x) => x.id === "traecode/deepseek-v4.1-flash");
+  const tw = codeList.find((x) => x.id === "traework/deepseek-v4.1-flash");
+  check("SR-005a：traecode 与 traework 归并为同一账号池（额度分量相等且非 0）",
+    !!tc && !!tw && tc.w === tw.w && tc.w > 0,
+    tc && tw ? `traecode.w=${tc.w} traework.w=${tw.w}` : "缺失");
+
+  // code 场景：tools!==true 一律淘汰
+  check("SR-005a：code 场景淘汰 tools 不满足的模型",
+    !codeList.some((x) => x.id === "codearts/GLM-5.2"));
+
+  // FREE 必须被识别为零消耗（不是 UNPRICED）
+  const freeRow = fastList.find((x) => x.id === "kilo/nvidia/nemotron:free");
+  check("SR-005a：free=true 识别为 FREE 而非 UNPRICED",
+    !!freeRow && freeRow.state === "FREE", freeRow ? freeRow.state : "缺失");
+
+  // 纯函数：同输入两次结果相等，且入参未被修改
+  const before = JSON.stringify(fees);
+  const a1 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands));
+  const a2 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands));
+  check("SR-005a：纯函数——同输入两次结果逐字节相等", a1 === a2);
+  check("SR-005a：纯函数——不修改入参", JSON.stringify(fees) === before);
+
+  // 证据等级不参与排序（把 evidence 塞进去也不改变顺序）
+  const cands2 = JSON.parse(JSON.stringify(cands));
+  cands2.scenes[0].candidates.forEach((c, i) => { c.report_evidence = { rate: i % 2 ? "unverified" : "local-measured" }; });
+  const a3 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands2));
+  check("SR-005a：证据等级不参与排序（改 evidence 后顺序与分数均不变）", a1 === a3);
+  // 再补一条直接断言：即便 candidatesData 里给了 evidence，输出里也不得把它带进 score 计算
+  const withEv = T.rankCandidates(fees, stats, "fast", cands2);
+  const withoutEv = T.rankCandidates(fees, stats, "fast", cands);
+  check("SR-005a：evidence 不进入 score（同一模型两种 evidence 下 score 相同）",
+    withEv.every((x) => {
+      const y = withoutEv.find((z) => z.id === x.id);
+      return y && x.score === y.score;
+    }));
 }
 
 // ---- 输出 ----
@@ -1978,5 +2093,7 @@ const LIVE_FB = [
 }
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
+
 process.exit(failed === 0 ? 0 : 1);
+
 
