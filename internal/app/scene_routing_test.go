@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/pool"
+	"wild-work/internal/provider"
+	"wild-work/internal/server"
 )
 
 // sceneBody 构造一次合法提交（三场景齐全），extra 覆盖/补充顶层键。
@@ -461,5 +466,247 @@ func TestSceneRoutingMissingToIsRejected(t *testing.T) {
 	}
 	if got := readCfgBytes(t, path); string(got) != "" {
 		t.Errorf("校验失败却写入了 config.json")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SR-004b：I5（渠道白名单，错误）/ I6（模型存在性，警告）/ I7（to[0] 跨渠道，警告）
+// ---------------------------------------------------------------------------
+
+// newPanelAppWithCatalog 构造一个注入了 server.Handler 的 App，且该 Handler 的
+// 模型缓存里预置了 modelsByKind（每个渠道各自一个池，供 CachedChannelModels 用）。
+//
+// 为什么必须注入 Handler：I6 的唯一取源是 `handler.CachedChannelModels()`（与 /api/fees
+// 面板同源、只读、不发网络请求）。不注入时目录不可用 ⇒ 按设计「一律不判」（见
+// sceneModelCatalog 的第二个返回值），故既有用例不会凭空多出警告。
+func newPanelAppWithCatalog(t *testing.T, modelsByKind map[provider.Kind][]provider.ModelInfo) *App {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StateFile = filepath.Join(dir, "state.json")
+	cfg.AuthDir = dir
+	cfg.Listen = config.Listen{Host: "127.0.0.1", Port: 7864}
+
+	appRts := map[provider.Kind]*Runtime{}
+	srvRts := map[provider.Kind]*server.Runtime{}
+	for k, ms := range modelsByKind {
+		p := pool.New(filepath.Join(dir, "state-"+k.String()+".json"))
+		p.Add(&auth.Auth{Kind: k.String(), UID: k.String() + "-1", AccessToken: "t", RefreshToken: "r"})
+		srvRts[k] = &server.Runtime{Kind: k, Pool: p, Upstream: &fakeUpstream{remain: 10}, StaticModels: ms}
+		appRts[k] = &Runtime{Kind: k, Pool: p, Upstream: &fakeUpstream{remain: 10}}
+	}
+	h := server.NewHandler(server.Config{Runtimes: srvRts})
+	a, err := New(Options{
+		ConfigPath: filepath.Join(dir, "config.json"),
+		Config:     cfg,
+		Runtimes:   appRts,
+		Handler:    h,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(a.Close)
+	return a
+}
+
+// TestSceneRoutingRejectsUnknownChannel ④ I5：不存在的渠道前缀 ⇒ 400 scene_unknown_channel，
+// 且文案列出已知渠道（用户自查靠它），并且不落盘。
+func TestSceneRoutingRejectsUnknownChannel(t *testing.T) {
+	cases := []struct {
+		name  string
+		mutFn func([]sceneSubmit) []sceneSubmit
+	}{
+		{"from 渠道不存在", func(s []sceneSubmit) []sceneSubmit {
+			s[0].From = "nosuchchannel/deepseek-v4.1-flash"
+			return s
+		}},
+		{"to 渠道不存在", func(s []sceneSubmit) []sceneSubmit {
+			s[1].To = []string{"nosuchchannel/claude-sonnet-4.5"}
+			return s
+		}},
+		{"渠道名大小写拼错", func(s []sceneSubmit) []sceneSubmit {
+			s[2].From = "Racoon/sn-kimi-k3-max" // 真名是 raccoon
+			return s
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newPanelApp(t, "127.0.0.1", "")
+			seedOtherEntries(t, a)
+			mux := panelMux(a)
+			path := cfgFilePath(a)
+
+			w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, tc.mutFn(goodScenes()), nil), nil)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("未知渠道应 400，实际 %d: %s", w.Code, w.Body.String())
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, "scene_unknown_channel") {
+				t.Errorf("错误码应为 scene_unknown_channel，实际 %s", body)
+			}
+			// 文案必须列出已知渠道：内建渠道与上游命名空间都要在。
+			for _, ch := range []string{"workbuddy", "raccoon", "cline-free"} {
+				if !strings.Contains(body, ch) {
+					t.Errorf("文案未列出已知渠道 %q（用户无法自查）：%s", ch, body)
+				}
+			}
+			if got := readCfgBytes(t, path); string(got) != "" {
+				t.Errorf("校验失败却写入了 config.json：%s", string(got))
+			}
+			a.mu.Lock()
+			dc := a.cfg.Compat.DefaultChannel
+			a.mu.Unlock()
+			if dc != "raccoon" {
+				t.Errorf("校验失败却改了内存态 default_channel=%q", dc)
+			}
+		})
+	}
+}
+
+// TestSceneRoutingAllowsUpstreamNamespace ④ I5 的反向护栏：`cline-free/*` 是上游命名空间
+// （provider.ModelNamespaces / R59），属合法渠道前缀，不得误杀。
+func TestSceneRoutingAllowsUpstreamNamespace(t *testing.T) {
+	cases := []struct{ name, id string }{
+		{"命名空间直写 cline-free/x", "cline-free/muse-spark"},
+		{"旧双层写法 cline/cline-free/x", "cline/cline-free/muse-spark"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newPanelApp(t, "127.0.0.1", "")
+			seedOtherEntries(t, a)
+			mux := panelMux(a)
+			scenes := goodScenes()
+			scenes[1].To = []string{tc.id}
+			w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%q 属合法上游命名空间，应 200，实际 %d: %s", tc.id, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestSceneRoutingWarnsUnknownModel ⑤ I6：目录里查不到的模型 ⇒ **200 且 warnings 非空**（不是 400）。
+// SR-001 §2.1：目录会漂移，把「当前查不到」当硬错误会让用户无法先把链配好。
+func TestSceneRoutingWarnsUnknownModel(t *testing.T) {
+	a := newPanelAppWithCatalog(t, map[provider.Kind][]provider.ModelInfo{
+		provider.WorkBuddy: {
+			{ID: "deepseek-v4.1-flash"},
+			{ID: "claude-sonnet-4.5"},
+		},
+		provider.Raccoon: {
+			{ID: "sn-kimi-k3"},
+			{ID: "sn-kimi-k3-max"},
+		},
+	})
+	seedOtherEntries(t, a)
+	mux := panelMux(a)
+	path := cfgFilePath(a)
+	before := readCfgBytes(t, path)
+
+	scenes := goodScenes()
+	scenes[0].To = []string{"raccoon/not-yet-published", "traework/deepseek-v3"}
+	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("目录里没有的模型应只警告、不阻断（200），实际 %d: %s", w.Code, w.Body.String())
+	}
+	var res SceneRoutingResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, w.Body.String())
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatalf("目录里没有的模型必须回 warnings，实际空：%s", w.Body.String())
+	}
+	joined := strings.Join(res.Warnings, " | ")
+	if !strings.Contains(joined, "raccoon/not-yet-published") {
+		t.Errorf("warnings 未点名缺失的模型 id：%v", res.Warnings)
+	}
+	if !strings.Contains(joined, "目录里没有") {
+		t.Errorf("warnings 文案未说清原因（目录里没有）：%v", res.Warnings)
+	}
+	// 警告不阻断 ⇒ 真的落盘了。
+	if string(readCfgBytes(t, path)) == string(before) {
+		t.Error("警告场景应当照常落盘，config.json 未变化")
+	}
+	a.mu.Lock()
+	got := a.cfg.Compat.ModelMap["fast"]
+	a.mu.Unlock()
+	if got != "workbuddy/deepseek-v4.1-flash" {
+		t.Errorf("警告场景未落盘内存态：model_map[fast]=%q", got)
+	}
+}
+
+// TestSceneRoutingNoWarnWhenCatalogHasModel I6 的反向护栏：目录里查得到 ⇒ 不出警告。
+// 这条能挡住「把 I6 写成无条件警告」的变异（否则所有保存都会刷黄条）。
+func TestSceneRoutingNoWarnWhenCatalogHasModel(t *testing.T) {
+	a := newPanelAppWithCatalog(t, map[provider.Kind][]provider.ModelInfo{
+		provider.WorkBuddy: {{ID: "deepseek-v4.1-flash"}, {ID: "claude-sonnet-4.5"}},
+		provider.Raccoon:   {{ID: "sn-kimi-k3"}, {ID: "sn-kimi-k3-max"}},
+		provider.TraeWork:  {{ID: "deepseek-v3"}, {ID: "claude-sonnet-4.5"}},
+	})
+	seedOtherEntries(t, a)
+	mux := panelMux(a)
+
+	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, goodScenes(), nil), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var res SceneRoutingResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, w.Body.String())
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("目录里全都能解析到，不应有警告：%v", res.Warnings)
+	}
+}
+
+// TestSceneRoutingWarnsSameChannelFirstFallback ⑥ I7：to[0] 与 from 同渠道 ⇒ 200 + 警告。
+// 理由：请求内重入按 skipSameChannel=true 只跨渠道，同渠道首选备胎会被跳过。
+func TestSceneRoutingWarnsSameChannelFirstFallback(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	seedOtherEntries(t, a)
+	mux := panelMux(a)
+
+	scenes := goodScenes()
+	// complex 的主模型是 raccoon/sn-kimi-k3-max，首个备胎也写 raccoon 的模型。
+	scenes[2].To = []string{"raccoon/sn-kimi-k3", "workbuddy/deepseek-v4.1-flash"}
+	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("同渠道首选备胎应只警告（200），实际 %d: %s", w.Code, w.Body.String())
+	}
+	var res SceneRoutingResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, w.Body.String())
+	}
+	joined := strings.Join(res.Warnings, " | ")
+	if !strings.Contains(joined, "同渠道") || !strings.Contains(joined, "skipSameChannel") {
+		t.Fatalf("warnings 应含 I7 提醒（同渠道 + skipSameChannel 后果），实际 %v", res.Warnings)
+	}
+	if !strings.Contains(joined, "raccoon/sn-kimi-k3") {
+		t.Errorf("warnings 未点名首选备胎：%v", res.Warnings)
+	}
+}
+
+// TestSceneRoutingNamespaceIsSameChannelForI7 I7 用归一后的渠道比较：
+// `cline-free/x`（主模型）与 `cline/cline-free/y`（备胎）是同一渠道 ⇒ 必须警告。
+// 这条挡住「只比字面前缀」的变异。
+func TestSceneRoutingNamespaceIsSameChannelForI7(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	seedOtherEntries(t, a)
+	mux := panelMux(a)
+
+	scenes := goodScenes()
+	scenes[1].From = "cline-free/muse-spark"
+	scenes[1].To = []string{"cline/cline-free/muse-spark-pro"}
+	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var res SceneRoutingResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, w.Body.String())
+	}
+	joined := strings.Join(res.Warnings, " | ")
+	if !strings.Contains(joined, "skipSameChannel") {
+		t.Errorf("命名空间与 kind 的两种写法是同一渠道，必须报 I7 警告，实际 %v", res.Warnings)
 	}
 }

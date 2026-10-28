@@ -2974,6 +2974,170 @@ func sceneAliasIn(v string) (string, bool) {
 	return "", false
 }
 
+// scenePrefixOf 取 scene 里模型 ID 的**字面前缀**（第一个 / 之前的部分，原样不改大小写）。
+// 无法拆分（无 / 或 / 在首尾）时返回空串。
+func scenePrefixOf(id string) string {
+	if i := strings.IndexByte(id, '/'); i > 0 {
+		return id[:i]
+	}
+	return ""
+}
+
+// sceneChannelKnown 判断一个 channel/model 的渠道前缀是否属于已知渠道集合。
+//
+// 判两档（先字面、后归一），因为「渠道前缀」有两种合法写法：
+//  1. 字面前缀就是渠道 kind（`workbuddy/x`、运行时自定义渠道 `stepfun/x`）；
+//  2. 字面前缀是**上游命名空间**（`cline-free/*`，provider.ModelNamespaces / R59）——
+//     它对客户端直接透传上游 ID。这一档若只比字面就会误杀，故再用
+//     provider.SplitModelID 把命名空间映射回渠道 kind 复核。
+//
+// set 的键统一小写（内建 kind 本身即小写；自定义渠道名 Validate 时也归一小写）。
+func sceneChannelKnown(set map[string]bool, id string) bool {
+	if pre := scenePrefixOf(id); pre != "" && set[strings.ToLower(pre)] {
+		return true
+	}
+	if k, _, ok := provider.SplitModelID(id); ok && set[strings.ToLower(k.String())] {
+		return true
+	}
+	return false
+}
+
+// sceneKindOf 把 scene 里的模型 ID 归一到渠道 kind（上游命名空间映射回其渠道）。
+// 返回 false 表示无法拆分（形状问题，调用方已另有判据拦截）。
+func sceneKindOf(id string) (provider.Kind, bool) {
+	k, _, ok := provider.SplitModelID(id)
+	return k, ok
+}
+
+// knownSceneChannels 返回「已知渠道」集合（键小写）+ 排序后的展示清单（I5 文案用）。
+//
+// 取源与 renameCustomRefs / isCustomChannel 同路，三层并集：
+//  1. provider.BuiltinKinds()——它**已把 ModelNamespaces（如 cline-free）并进来**，
+//     自己再补一份命名空间反而会重复且易漂移；
+//  2. App 运行时表里的自定义渠道（rt.Custom，热更新后立刻生效的那一份）；
+//  3. config.CustomChannels 里的名字（盘上那一份；与 2 互为兜底，改名窗口内两者可能不同步）。
+//
+// 展示清单排序后返回：同一份配置每次报错文案必须逐字一致（否则前端 diff 抖动）。
+func (a *App) knownSceneChannels() (map[string]bool, []string) {
+	set := provider.BuiltinKinds()
+	for _, rt := range a.runtimesSnapshot() {
+		if rt != nil && rt.Custom {
+			if n := strings.ToLower(strings.TrimSpace(rt.Kind.String())); n != "" {
+				set[n] = true
+			}
+		}
+	}
+	a.mu.Lock()
+	for _, cc := range a.cfg.CustomChannels {
+		if n := strings.ToLower(strings.TrimSpace(cc.Name)); n != "" {
+			set[n] = true
+		}
+	}
+	a.mu.Unlock()
+
+	names := make([]string, 0, len(set))
+	for k := range set {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return set, names
+}
+
+// sceneModelCatalog 返回「渠道 kind（小写）→ 该渠道当前可解析的模型 ID 集合」，供 I6 判存在性。
+//
+// 只读、**绝不发网络请求**：唯一取源是 server.Handler.CachedChannelModels()——它与
+// `/api/fees` 面板同源（上次成功拉取的动态表，过期也照用；陈旧性由后台 30min 刷新收敛）。
+// 不调 FetchModels 的原因：那是「现在去上游拉」，一次保存动作不该产生上游请求（也违反 §0.1）。
+//
+// 第二个返回值 false = 目录整体不可用（handler 未注入 / 尚无任何渠道目录条目）。
+// 此时 I6 **一律不判**：从「没有目录」不能推出「模型不存在」，否则测试环境与冷启动会
+// 给每一个模型都刷一条假警告。
+func (a *App) sceneModelCatalog() (map[string]map[string]bool, bool) {
+	if a.handler == nil {
+		return nil, false
+	}
+	models := a.handler.CachedChannelModels()
+	if len(models) == 0 {
+		return nil, false
+	}
+	out := make(map[string]map[string]bool, len(models))
+	for k, infos := range models {
+		set := make(map[string]bool, len(infos)*2)
+		for _, mi := range infos {
+			raw := strings.TrimSpace(mi.ID)
+			if raw == "" {
+				continue
+			}
+			pub := provider.PublicModelID(k, raw)
+			// 三种写法都算「目录里有」：上游裸 ID、对外 ID（`渠道/模型` 或命名空间整串）、
+			// 以及归一后的规范 ID（cline 的新旧两种写法落同一串，R52/R59）。
+			set[raw] = true
+			set[pub] = true
+			set[provider.CanonicalModelID(pub)] = true
+		}
+		if len(set) > 0 {
+			out[strings.ToLower(k.String())] = set
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// sceneRoutingWarnings 计算两类「不阻断保存」的提醒（SR-001 §2 的 I6 / I7、§2.1 的理由）。
+//
+// rules 与 sceneAliases 必须**同序等长**（调用方在 sceneAliases 固定顺序上逐条 append 生成），
+// 故这里按下标取别名，不另建索引。
+//
+// I6（模型存在性）：目录里查不到 ⇒ 警告。目录会漂移（上游按批次下发），把它当硬错误会让用户
+// 无法「先把链配好、等上游补目录」。仅当该渠道**有目录条目**时才判——无条目 = 无从判断。
+//
+// I7（to[0] 跨渠道）：首选备胎与主模型同渠道 ⇒ 警告。请求内重入按 skipSameChannel=true 只跨渠道
+// （server/handler.go 的 pickModelFallback），同渠道备胎会被跳过 ⇒ 第一顺位等于失效。
+// 比较用归一后的渠道 kind：`cline-free/x` 与 `cline/cline-free/x` 是同一渠道的两种写法。
+func (a *App) sceneRoutingWarnings(rules []config.ModelFallbackRule) []string {
+	catalog, catalogOK := a.sceneModelCatalog()
+	var out []string
+	for i := range rules {
+		r := rules[i]
+		alias := ""
+		if i < len(sceneAliases) {
+			alias = sceneAliases[i]
+		}
+		ids := append([]string{r.From}, r.To...)
+		for _, id := range ids {
+			if !catalogOK {
+				break
+			}
+			k, ok := sceneKindOf(id)
+			if !ok {
+				continue
+			}
+			set := catalog[strings.ToLower(k.String())]
+			if set == nil {
+				continue // 该渠道没有目录条目 ⇒ 无从判断，不警告
+			}
+			if set[id] || set[provider.CanonicalModelID(id)] {
+				continue
+			}
+			out = append(out, fmt.Sprintf("场景 %q 的 %q 当前目录里没有——可能是上游暂未下发，保存后请留意", alias, id))
+		}
+		// I7：只在首选备胎上判（链上其它位置本就是「备而不用」，同渠道不构成误导）。
+		if len(r.To) == 0 {
+			continue
+		}
+		fk, fok := sceneKindOf(r.From)
+		tk, tok := sceneKindOf(r.To[0])
+		if !fok || !tok || fk != tk {
+			continue
+		}
+		out = append(out, fmt.Sprintf("场景 %q 的首选备胎 %q 与主模型 %q 同渠道（%s）——"+
+			"429 时会被跳过（skipSameChannel），建议换一个渠道的", alias, r.To[0], r.From, tk.String()))
+	}
+	return out
+}
+
 // sceneSubmit 一条场景输入（SR-001 §1：一个场景 = 一个原子对象）。
 type sceneSubmit struct {
 	Alias string   `json:"alias"`
@@ -3001,6 +3165,12 @@ type SceneRoutingResult struct {
 	MaxTokensCap   int                        `json:"max_tokens_cap"`
 	ModelMap       map[string]string          `json:"model_map"`
 	ModelFallback  []config.ModelFallbackRule `json:"model_fallback"`
+	// Warnings 不阻断保存的提醒（I6 目录里查不到该模型 / I7 首选备胎与主模型同渠道）。
+	//
+	// 为什么用 warning 而不是 error（SR-001 §2.1）：目录会漂移（上游按批次下发），把
+	// 「此刻查不到」当硬错误会让用户无法先把链配好、等上游补目录。可保存 + 如实告知。
+	// omitempty：无提醒时响应形状与升级前逐字节一致（老前端不受影响）。
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // SetSceneRouting 把「三场景别名 + 三条降级链」作为**单一事务**写入（SD-6 裁决的唯一写入口）。
@@ -3081,6 +3251,30 @@ func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) 
 		}
 	}
 
+	// ④ I5：from/to 每一项的渠道前缀必须属于「已知渠道集合」（内建 ∪ 运行时自定义 ∪ 上游命名空间）。
+	// 必须在 a.mu.Lock() 之前做：knownSceneChannels 自己要拿 a.mu（锁不可重入）。
+	// 文案列出已知渠道：用户自查靠它（「是不是我把渠道名拼错了」是最高频的一类）。
+	known, knownList := a.knownSceneChannels()
+	for _, alias := range sceneAliases {
+		ids := append([]string{sceneFrom[alias]}, byAlias[alias].To...)
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue // 空项由 validateFallbackRules 去空/判空处理
+			}
+			if sceneChannelKnown(known, id) {
+				continue
+			}
+			return nil, fmt.Errorf("scene_unknown_channel: 场景 %q 的 %q 渠道前缀 %q 不是已知渠道——"+
+				"已知渠道：%s（自定义渠道请在「自定义渠道」里先建好；上游命名空间如 cline-free 也可直接写）",
+				alias, id, scenePrefixOf(id), strings.Join(knownList, ", "))
+		}
+	}
+
+	// ⑤ I6/I7：模型存在性与首选备胎跨渠道 ⇒ **警告不阻断**（SR-001 §2.1）。
+	// 必须在 dry_run 与真实提交两条路径上都算出来：dry_run 的预览要能提前看到同样的提醒。
+	warnings := a.sceneRoutingWarnings(rules)
+
 	a.mu.Lock()
 	oldMap := a.cfg.Compat.ModelMap
 	// 场景规则的身份 = 「From 属于旧三场景主模型或新三场景主模型」。按此对齐替换，
@@ -3120,6 +3314,7 @@ func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) 
 		MaxTokensCap:   req.MaxTokensCap,
 		ModelMap:       newMap,
 		ModelFallback:  merged,
+		Warnings:       warnings,
 	}
 	if req.DryRun {
 		a.mu.Unlock()
