@@ -136,6 +136,9 @@ type Handler struct {
 	efMu    sync.RWMutex      // 保护 efforts（面板可运行时修改）
 	efforts map[string]string // 思考强度注入映射（cfg.ReasoningEfforts 初始，热更新经 SetReasoningEfforts）
 
+	mmMu     sync.RWMutex      // 保护 modelMap（面板可运行时修改）
+	modelMap map[string]string // 裸名别名表（compat.model_map 的副本，热更新经 SetModelMap；nil/空 = 不解析别名）
+
 	runtimesMu sync.RWMutex               // 保护 customRts 动态热更新（R66）
 	customRts  map[provider.Kind]*Runtime // 自定义渠道运行时
 }
@@ -171,6 +174,75 @@ func (h *Handler) SetReasoningEfforts(efforts map[string]string) {
 	h.efMu.Lock()
 	h.efforts = efforts
 	h.efMu.Unlock()
+}
+
+// SetModelMap 热更新内层别名表（= `compat.model_map` 的副本，面板保存后由 app 层回调；
+// nil/空 = 不解析别名，行为与改造前逐字等价）。
+//
+// 为什么必须拷贝：调用方（app/main）持有的是同一份 config 对象，面板保存时可能原地
+// 改写并复用该 map；共享同一个 map 会让「拷一份快照」的并发读语义失效（读到半改状态）。
+// nil 归一成空 map，使「未配置」与「配置为空」在解析处走同一分支。
+func (h *Handler) SetModelMap(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	h.mmMu.Lock()
+	h.modelMap = cp
+	h.mmMu.Unlock()
+}
+
+// resolveAlias 把客户端模型名里的「裸名别名」解析为 `compat.model_map` 里的全路径。
+//
+// 语义与 gateway.Router.Resolve（internal/gateway/router.go:25）**同源**：
+// 精确匹配 → 通配（key 以 `*` 结尾，取最长匹配前缀）→ 未命中原样返回。
+// 刻意与 gateway 不同的两点（MS-006 设计口径 1/3，均为「零行为变化」要求）：
+//   - 只解析裸名：含 `/` 的模型名**原样返回**，不查表（`channel/model` 与
+//     `cline-free/x` 这类上游命名空间直通形态都零变化）；
+//   - **不做 default_channel 回退**：内层若回退，会把现在「裸名报 400」变成
+//     「静默路由到默认渠道」，属行为变更，本轮只加别名查表。
+//
+// 未命中/映射目标为空一律原样返回，让 runtimeForModel 报出与改造前逐字相同的
+// "model must use explicit prefix…" 错误（口径 5：空表 = 完全 no-op）。
+func (h *Handler) resolveAlias(model string) string {
+	if strings.ContainsRune(model, '/') {
+		return model // 全路径：不查表、原样返回（含前导/尾随空白的原值也保持不变）
+	}
+	name := strings.TrimSpace(model)
+	if name == "" {
+		return model
+	}
+	h.mmMu.RLock()
+	m := h.modelMap
+	target := strings.TrimSpace(m[name])
+	if target == "" {
+		// 通配匹配：与 gateway 同一条判据（key 以 * 结尾时按前缀比，取最长 key）
+		if k := longestAliasWildcardKey(m, name); k != "" {
+			target = strings.TrimSpace(m[k])
+		}
+	}
+	h.mmMu.RUnlock()
+	if target == "" {
+		return model // 未命中（或映射目标为空 = 配置残留）：原样返回，错误串不变
+	}
+	return target
+}
+
+// longestAliasWildcardKey 返回最长的匹配通配 key（无则空串），与
+// gateway.longestWildcardKey 逐字同源：仅 key 以 `*` 结尾时按前缀匹配，
+// `*` 出现在中间视为普通字符。大小写敏感（Go map 查表语义，与 gateway 一致）。
+func longestAliasWildcardKey(m map[string]string, model string) string {
+	best := ""
+	for k := range m {
+		if !strings.HasSuffix(k, "*") {
+			continue
+		}
+		prefix := strings.TrimSuffix(k, "*")
+		if strings.HasPrefix(model, prefix) && len(k) > len(best) {
+			best = k
+		}
+	}
+	return best
 }
 
 func NewHandler(cfg Config) *Handler {
@@ -562,7 +634,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 		return
 	}
-	rt, model, err := h.runtimeForModel(peek.Model)
+	// 别名解析（`compat.model_map`）：必须发生在 runtimeForModel **之前**，且解析结果
+	// 必须写回传给它 —— runtimeForModel 返回的 upstream 模型名随后被 pickModelFallback
+	// 用来匹配 rule.From（那里比的是真模型的上游名），若继续拿别名去匹配，降级链对
+	// 别名请求**永远不命中**（MS-006 设计口径 4）。
+	// clientModel 仍取客户端原值：响应 model 字段「回填请求名」语义不变（MS-003 已确认）。
+	// model_map 为空/nil 时 resolveAlias 是恒等变换 ⇒ 旧行为逐字不变（口径 5）。
+	rt, model, err := h.runtimeForModel(h.resolveAlias(peek.Model))
+
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
 		return

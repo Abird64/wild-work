@@ -780,9 +780,17 @@ func main() {
 		},
 		MaxTokensCap: cfg.Compat.MaxTokensCap,
 	})
+	// 内层 handler 的别名表（`compat.model_map` 的正本）：让别名对
+	// /v1/chat/completions 也生效（MS-006）。外层三个兼容端点由上面的
+	// gateway.Router 解析，两条通道同源（精确 → 通配最长前缀），唯一差别是
+	// 内层**不做** default_channel 回退（裸名仍报原来的 400，不放宽成猜渠道）。
+	inner.SetModelMap(cfg.Compat.ModelMap)
 	// 面板保存 compat 时热更新兼容层路由表（不然新映射要重启才生效）
 	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
 		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, currentChannels())
+		// 内层别名表走同一个回调：面板一改别名，/v1/chat/completions 立即跟随，
+		// 不必重启（口径 6）。空表 = 关闭别名解析，行为回到改造前。
+		inner.SetModelMap(modelMap)
 	})
 	// 面板保存模型降级链时热更新内层 handler（不然新链要重启才生效）
 	appInst.SetModelFallbackSyncer(func(rules []config.ModelFallbackRule) {
