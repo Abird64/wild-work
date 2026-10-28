@@ -2904,10 +2904,13 @@ func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, m
 // SetModelFallbackSyncer 注入模型降级链热更新回调（由 main.go 注入：推给 server.Handler）。
 func (a *App) SetModelFallbackSyncer(fn func(rules []config.ModelFallbackRule)) { a.fbSyncer = fn }
 
-// SetModelFallback 保存模型降级链（设置面板可视化编辑）。
-// 校验：From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、
-// 不含 From 自身（不自环）；空规则列表 = 清空禁用。保存即热生效（fbSyncer）。
-func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
+// validateFallbackRules 校验模型降级链规则集合：From/To 均须 channel/model 全路径、
+// From 全局唯一、每链 To 至少一项、不含 From 自身（不自环）。原地 trim 并回填 To（去空项）。
+//
+// 为什么必须抽出来共用：`SetModelFallback`（整表保存）与新原子端点 `SetSceneRouting`
+// （三场景 + 三条链一次落盘）必须是**同一份**判据。各写一份就会漂移成
+// 「单独保存通过、原子保存拒绝」这类自相矛盾的文案（SR-001 §2 的 I2/I3 由机制层拦）。
+func validateFallbackRules(rules []config.ModelFallbackRule) error {
 	seen := map[string]bool{}
 	for i := range rules {
 		r := &rules[i]
@@ -2937,6 +2940,219 @@ func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
 			return fmt.Errorf("主模型 %q 的降级链为空（至少填一个备胎模型）", r.From)
 		}
 		r.To = tos
+	}
+	return nil
+}
+
+// sceneAliases 三场景别名枚举（SD-9：本版固定三个，扩别名须同步改 SR-001 §1）。
+// 顺序即写入 model_map / model_fallback 的顺序，保证同一输入的提交结果深度相等（幂等）。
+var sceneAliases = []string{"fast", "code", "complex"}
+
+// isSceneAlias 判断 s 是否为三场景别名之一。
+func isSceneAlias(s string) bool {
+	for _, a := range sceneAliases {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
+
+// sceneAliasIn 报告 v 里的「模型名部分」是否落在三场景别名上，返回命中的别名。
+//
+// 为什么不能只比整串：SD-8 说「from/to 不得等于别名」，但**真正会静默失效的形态是带渠道
+// 前缀的** `workbuddy/fast`（MS-006 实测）。运行期 SplitModelID 拆出 up="fast"，而真实请求的
+// model 是解析后的 deepseek-v4.1-flash ⇒ 永不相等 ⇒ 整条链静默永不触发，且不报任何错。
+// 故整串命中与「前缀/模型名」命中共算一档。
+func sceneAliasIn(v string) (string, bool) {
+	if isSceneAlias(v) {
+		return v, true
+	}
+	if i := strings.Index(v, "/"); i > 0 && isSceneAlias(v[i+1:]) {
+		return v[i+1:], true
+	}
+	return "", false
+}
+
+// sceneSubmit 一条场景输入（SR-001 §1：一个场景 = 一个原子对象）。
+type sceneSubmit struct {
+	Alias string   `json:"alias"`
+	From  string   `json:"from"`
+	To    []string `json:"to"`
+}
+
+// sceneRoutingReq POST /api/config/scene_routing 的请求体。
+//
+// ModelMap 是可选回填（SR-001 §3.1「整体替换 ⇒ 必须回填」）：nil 时端点从当前配置自带
+// 其它键（更安全，调用方不必先 GET /api/state）；携带时只用来校验 I8。
+type sceneRoutingReq struct {
+	Scenes         []sceneSubmit     `json:"scenes"`
+	DefaultChannel string            `json:"default_channel"`
+	MaxTokensCap   int               `json:"max_tokens_cap"`
+	ModelMap       map[string]string `json:"model_map,omitempty"`
+	DryRun         bool              `json:"dry_run"`
+}
+
+// SceneRoutingResult 原子端点响应（dry_run 与真实提交同形，供 SR-005 的 diff 预览复用）。
+type SceneRoutingResult struct {
+	OK             bool                       `json:"ok"`
+	DryRun         bool                       `json:"dry_run"`
+	DefaultChannel string                     `json:"default_channel"`
+	MaxTokensCap   int                        `json:"max_tokens_cap"`
+	ModelMap       map[string]string          `json:"model_map"`
+	ModelFallback  []config.ModelFallbackRule `json:"model_fallback"`
+}
+
+// SetSceneRouting 把「三场景别名 + 三条降级链」作为**单一事务**写入（SD-6 裁决的唯一写入口）。
+//
+// 为什么必须是一个端点：`SetCompat` 与 `SetModelFallback` 各自整体替换字段 + 各调一次
+// `config.Save`（写两遍全量 config.json），两次 POST 之间任何失败都留下真实中间态——
+// 「别名指向一条没有规则的模型」（降级静默失效）或「规则的 From 成为孤儿」（链永不触发）。
+// 前端补偿无解：无回滚端点，回滚自身也可能失败（问题递归一次）。
+//
+// 落盘语义：同一把 a.mu 锁内改 model_map 的三个别名键（其它键保留）+ DefaultChannel +
+// MaxTokensCap + model_fallback 里对应三条规则（按 alias→from 对齐，其它规则不动），
+// **只调一次 config.Save**；成功后同一函数体内连续推 compatSyncer 与 fbSyncer
+// （两者必须同路径，否则「配置已新、内存仍旧」）。
+//
+// 硬校验（落盘前全过才写）：
+//   - I4（SD-8）：from/to 任一项等于别名 ⇒ 拒收。机制层只校「含 /」，`workbuddy/fast` 会通过，
+//     而运行期 SplitModelID 拆出的真实 model 永远不等于别名 ⇒ 整条链静默永不触发且不报错
+//     （MS-006 实测坐实）。
+//   - I8：回填 model_map[alias] 与 scene.from 不一致 ⇒ 拒收（两处视图分裂会让降级静默失效）。
+//   - SD-9：别名集合必须恰为 {fast,code,complex}（不多不少；本版只做三个）。
+//
+// 其余不变量（To 非空 I2、禁自环 I3、From 唯一 I1、channel/model 形状）一律走
+// validateFallbackRules —— 与 `SetModelFallback` 同源复用，**不重写判据**。
+func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) {
+	// ③ SD-9：别名集合恰为 {fast,code,complex}。
+	if len(req.Scenes) != len(sceneAliases) {
+		return nil, fmt.Errorf("scene_bad_shape: 必须恰好提交 %d 个场景（%s），实际 %d 个",
+			len(sceneAliases), strings.Join(sceneAliases, "/"), len(req.Scenes))
+	}
+	byAlias := make(map[string]sceneSubmit, len(req.Scenes))
+	for _, sc := range req.Scenes {
+		alias := strings.TrimSpace(sc.Alias)
+		if !isSceneAlias(alias) {
+			return nil, fmt.Errorf("scene_bad_shape: 未知场景别名 %q（只能是 %s）",
+				alias, strings.Join(sceneAliases, "/"))
+		}
+		if _, dup := byAlias[alias]; dup {
+			return nil, fmt.Errorf("scene_bad_shape: 场景别名 %q 重复提交", alias)
+		}
+		byAlias[alias] = sc
+	}
+
+	// 逐场景形状 + ① I4（别名拒收）。按 sceneAliases 固定顺序生成，保证幂等。
+	sceneFrom := make(map[string]string, len(sceneAliases))
+	rules := make([]config.ModelFallbackRule, 0, len(sceneAliases))
+	for _, alias := range sceneAliases {
+		sc := byAlias[alias]
+		from := strings.TrimSpace(sc.From)
+		if hit, ok := sceneAliasIn(from); ok {
+			return nil, fmt.Errorf("scene_alias_in_model: 场景 %q 的主模型写成了别名 %q（%q）——"+
+				"要写 渠道/模型 全路径；写别名会让整条链永不触发且不报错", alias, hit, from)
+		}
+		if strings.Index(from, "/") <= 0 {
+			return nil, fmt.Errorf("scene_bad_shape: 场景 %q 的主模型 %q 需为 channel/model 形式", alias, from)
+		}
+		sceneFrom[alias] = from
+		to := make([]string, 0, len(sc.To))
+		for _, one := range sc.To {
+			one = strings.TrimSpace(one)
+			if hit, ok := sceneAliasIn(one); ok {
+				return nil, fmt.Errorf("scene_alias_in_model: 场景 %q 的备胎写成了别名 %q（%q）——"+
+					"要写 渠道/模型 全路径；写别名会让整条链永不触发且不报错", alias, hit, one)
+			}
+			to = append(to, one)
+		}
+		rules = append(rules, config.ModelFallbackRule{From: from, To: to})
+	}
+	// 复用 SetModelFallback 判据（I2 To 非空 / I3 禁自环 / I1 From 唯一 / channel-model 形状）。
+	if err := validateFallbackRules(rules); err != nil {
+		return nil, fmt.Errorf("scene_bad_shape: %w", err)
+	}
+
+	// ② I8：回填的 model_map 里别名指向必须与本次 from 一致。
+	for _, alias := range sceneAliases {
+		if old, ok := req.ModelMap[alias]; ok && old != "" && old != sceneFrom[alias] {
+			return nil, fmt.Errorf("scene_map_mismatch: 别名 %q 指向 %q，但它的链主模型是 %q——"+
+				"两者不一致会让降级静默失效", alias, old, sceneFrom[alias])
+		}
+	}
+
+	a.mu.Lock()
+	oldMap := a.cfg.Compat.ModelMap
+	// 场景规则的身份 = 「From 属于旧三场景主模型或新三场景主模型」。按此对齐替换，
+	// 既不会把改名后的旧主模型留成孤儿规则，也不动用户自建的其它规则（SR-001 §3.1）。
+	sceneSlots := make(map[string]bool, len(sceneAliases)*2)
+	for _, alias := range sceneAliases {
+		if v := oldMap[alias]; v != "" {
+			sceneSlots[v] = true
+		}
+		sceneSlots[sceneFrom[alias]] = true
+	}
+	kept := make([]config.ModelFallbackRule, 0, len(a.cfg.ModelFallback))
+	for _, r := range a.cfg.ModelFallback {
+		if sceneSlots[strings.TrimSpace(r.From)] {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	merged := append(kept, rules...)
+	// 合并后的整表仍须满足机制层不变量（也顺带挡住磁盘上本来就有重复的旧规则）。
+	if err := validateFallbackRules(merged); err != nil {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("scene_bad_shape: %w", err)
+	}
+
+	newMap := make(map[string]string, len(oldMap)+len(sceneAliases))
+	for k, v := range oldMap {
+		newMap[k] = v
+	}
+	for _, alias := range sceneAliases {
+		newMap[alias] = sceneFrom[alias]
+	}
+	res := &SceneRoutingResult{
+		OK:             true,
+		DryRun:         req.DryRun,
+		DefaultChannel: req.DefaultChannel,
+		MaxTokensCap:   req.MaxTokensCap,
+		ModelMap:       newMap,
+		ModelFallback:  merged,
+	}
+	if req.DryRun {
+		a.mu.Unlock()
+		return res, nil // 只校验 + 回清单；不落盘、不推 syncer
+	}
+
+	a.cfg.Compat.DefaultChannel = req.DefaultChannel
+	a.cfg.Compat.MaxTokensCap = req.MaxTokensCap
+	a.cfg.Compat.ModelMap = newMap
+	a.cfg.ModelFallback = merged
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// 热更新一次性推送（R-3：两个 syncer 必须同一函数体内连续调用）。
+	if a.compatSyncer != nil {
+		a.compatSyncer(req.DefaultChannel, req.MaxTokensCap, newMap)
+	}
+	if a.fbSyncer != nil {
+		a.fbSyncer(merged)
+	}
+	log.Printf("三场景路由已原子更新：default_channel=%q max_tokens_cap=%d 场景=%d 条 model_fallback=%d 条",
+		req.DefaultChannel, req.MaxTokensCap, len(sceneAliases), len(merged))
+	return res, nil
+}
+
+// SetModelFallback 保存模型降级链（设置面板可视化编辑）。
+// 校验：From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、
+// 不含 From 自身（不自环）；空规则列表 = 清空禁用。保存即热生效（fbSyncer）。
+func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
+	if err := validateFallbackRules(rules); err != nil {
+		return err
 	}
 	a.mu.Lock()
 	a.cfg.ModelFallback = rules
@@ -3884,6 +4100,20 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 三场景原子端点（SD-6 唯一写入口）：三场景别名 + 三条降级链 + compat 三项一次落盘。
+	mux.HandleFunc("POST /api/config/scene_routing", func(w http.ResponseWriter, r *http.Request) {
+		var req sceneRoutingReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "scene_bad_shape: 请求体不是合法 JSON："+err.Error())
+			return
+		}
+		res, err := a.SetSceneRouting(req)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	})
 	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
