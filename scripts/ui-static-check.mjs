@@ -639,15 +639,25 @@ check("里程碑 toast 同 id 去重（只写一次已读标记）", toastWrites
 
 // ---- 静态结构断言：index.html / style.css 的 stats 骨架 ----
 const html = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
-check('第三个 tab 按钮存在（data-mtab="stats"）', /data-mtab="stats"/.test(html));
-check("#mtabStats body 存在且默认隐藏", /class="mtab-body hidden" id="mtabStats"/.test(html));
+// R129 四 Tab（2026-10-29）：首页 / 账号管理 / 模型管理 / 其他。
+// 原「运行统计」「模型列表和费率」不再各占一个 tab——统计并入首页、费率并入模型管理。
+check('第三个 tab 按钮存在（data-mtab="models"）', /data-mtab="models"/.test(html));
+check("#mtabModels body 存在且默认隐藏", /class="mtab-body hidden" id="mtabModels"/.test(html));
+check('第四个 tab 按钮存在（data-mtab="other"）', /data-mtab="other"/.test(html));
+check("#mtabOther body 存在且默认隐藏", /class="mtab-body hidden" id="mtabOther"/.test(html));
+check('第一个 tab 是首页（data-mtab="home" 且默认 active）',
+  /class="mtab active" data-mtab="home"/.test(html));
+// 统计并入首页：mtabStats 仍是容器（JS 靠这个 id 渲染），但不再是 mtab-body
+check("运行统计并入首页（#mtabStats 是 home-sec 而非独立 tab）",
+  /class="home-sec" id="mtabStats"/.test(html) && !/class="mtab-body[^"]*" id="mtabStats"/.test(html));
 check("运行统计区块骨架存在（stPlat/stApplog）", /id="stPlat"/.test(html) && /id="stApplog"/.test(html));
 check("更新角标存在（id=stUpdated，拉取失败可感知）", /id="stUpdated"/.test(html));
-// ---- 第四个 tab：模型列表和费率（原独立 section 移入主 tab 组）----
-check('第四个 tab 按钮存在（data-mtab="fees"）', /data-mtab="fees"/.test(html));
-check("#mtabFees body 存在且默认隐藏", /class="mtab-body hidden" id="mtabFees"/.test(html));
+// 费率并入「模型管理」：仍是 #mtabFees 容器（JS 靠 id 渲染），但不再是 tab-body
+check("费率并入模型管理（#mtabFees 在 #mtabModels 内）",
+  /id="mtabModels"[\s\S]*id="mtabFees"/.test(html) && !/class="mtab-body[^"]*" id="mtabFees"/.test(html));
 check("模型费率区块骨架存在（feesBox/btnRefreshFees）", /id="feesBox"/.test(html) && /id="btnRefreshFees"/.test(html));
-check("模型费率区块在 section 内（不再是独立 section）", /<div class="mtab-body hidden" id="mtabFees">[\s\S]*?<\/section>/.test(html) && !/<!-- 模型列表和费率 -->\s*<section class="panel">/.test(html));
+check("费率区块在主 section 内（不再是独立 section）",
+  /id="feesBox"[\s\S]*?<\/section>/.test(html) && !/<!-- 模型列表和费率 -->\s*<section class="panel">/.test(html));
 const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
 check("style.css 含运行统计样式段（#mtabStats .st-plat-row 等）", /#mtabStats \.st-token/.test(css) && /#mtabStats \.st-plat-row/.test(css));
 // ---- Token 多天行单行：不许回退成 wrap（wrap 会在内容长度临界时抖动换行）----
@@ -664,10 +674,13 @@ check("平台表列宽动态化（--plat-cols 变量 + fitPlatCols 实测），�
   /#mtabStats \.st-plat-row \{\n  display: grid;[\s\S]*?grid-template-columns: var\(--plat-cols, 28px minmax\(150px, 1fr\) 52px 100px 80px 96px 72px 112px 84px 84px 84px\)/.test(css) &&
   raw.includes("function fitPlatCols") && raw.includes('style.setProperty("--plat-cols"') &&
   raw.includes("offsetParent") /* 隐藏时跳过 */ &&
-  /b\.dataset\.mtab === "stats"[\s\S]{0,200}fitPlatCols\(\)/.test(raw) /* 切回时重测 */ &&
+  /if \(t === "home"\)[\s\S]{0,200}fitPlatCols\(\)/.test(raw) /* R129：统计并入首页，进首页时重测 */ &&
   /\$\("stPlat"\)\.innerHTML = html;\s*fitPlatCols\(\);/.test(raw) /* 渲染后实测，别只留 tab 切换那处 */);
+// 单色/紫黑主题（R99 v3）：原写死 #7c3aed 改为走 --accent 令牌——
+// 断言意图不变（合计行积分=资产紫系、Token=琥珀系，与汇总条同源），
+// 但不再锁死具体 hex：锁 hex 会让「换主题色」变成测试失败。
 check("合计行当前积分=资产紫、Token=琥珀（与汇总条同色系）",
-  /#mtabStats \.st-plat-row\.st-plat-sum-row \.st-plat-credits \{ color: #7c3aed/.test(css) &&
+  /#mtabStats \.st-plat-row\.st-plat-sum-row \.st-plat-credits \{ color: var\(--accent\)/.test(css) &&
   /#mtabStats \.st-plat-row\.st-plat-sum-row \.st-plat-tokens \{ color: var\(--warn\)/.test(css));
 // 今日作废用 danger 色，与「今日消耗」的 warn 色分开（语义相反：真花掉 / 没花就没了）
 check("今日作废列配色为 danger（与今日消耗的 warn 区分）",
@@ -1376,7 +1389,10 @@ for (const [label, re] of uniq) {
       html.includes("与真实对话同源") && html.includes("自动改走备用通道")],
     ["旧「每渠道代理」输入表已清除（R57：不再有 PROXY_CHANNELS / proxyList）",
       !raw.includes("PROXY_CHANNELS") && !html.includes('id="proxyList"') && !raw.includes("/api/config/proxies")],
-    ["style.css 有 cline 渠道色", css.includes(".badge.cline") && css.includes(".btn.primary.alt.cline")],
+    // R99 v3 后徽章/按钮不再为每个渠道单写颜色规则；这条改为守「cline 的渠道类名
+    // 仍出现在 HTML 按钮上」——按钮的 alt 修饰类还在，只是颜色统一了。
+    ["cline 渠道按钮带 alt cline 修饰类（颜色已统一，类名仍保留）",
+      html.includes("btn primary alt cline") && raw.includes('cline: "cline"')],
   ];
   for (const [label, pass] of need) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}`);
@@ -1488,7 +1504,8 @@ for (const [label, re] of uniq) {
     ["外部关闭路径已绑定一次", raw.includes("bindCreditDetailDismiss()")],
     ["关闭判定用 composedPath（syncCreditsFromDetail 会在派发途中重写积分格，e.target 会变 detached）",
       /bindCreditDetailDismiss[\s\S]{0,900}composedPath/.test(raw) && !/closest\("\.acct-credits"\)/.test(raw)],
-    ["切主 tab 仍会收起浮窗", /切换主 tab 强制收起积分明细浮窗[\s\S]{0,80}closeCreditDetail\(\)/.test(raw)],
+    ["切主 tab 仍会收起浮窗", /切 tab 强制收起积分明细浮窗[\s\S]{0,80}closeCreditDetail\(\)/.test(raw) ||
+      /closeCreditDetail\(\); *\/\/ 切 tab/.test(raw)],
     [".credit-tip 不再重复定义（原两块，后者静默覆盖前者）", (css.match(/^\.credit-tip \{/gm) || []).length === 1],
     ["浮窗宽度自适应视口（手机不再溢出）", /width: min\(420px, calc\(100vw - 24px\)\)/.test(css)],
     // 响应式：断点是按实测溢出阈值卡位的，调宽会破坏桌面端逐像素一致性，调窄则手机仍溢出。
@@ -1765,12 +1782,18 @@ const LIVE_FB = [
     // 测试按钮必须带 name（否则脱敏回显态的 api_key 无法在后端找回真实密钥，恒 401）
     ["自定义渠道测试请求携带 name（后端子据以找回被脱敏的真实 api_key）",
       /custom_channel_test[\s\S]{0,90}name[:,]/.test(raw)],
-    ["style.css 有自定义渠道徽章颜色", css.includes(".badge.custom")],
+    // 自定义渠道现在与内建渠道同色（单一 --ch），.badge.custom 不再需要单独配色；
+    // 这条改为守「自定义渠道的类名兜底仍在」（chClass 对未知 key 回退 custom）。
+    ["自定义渠道类名兜底仍在（chClass 对未知 key 回退 custom）",
+      /const chClass = \(k\) => CH_CLASS\[k\] \|\| "custom"/.test(raw)],
     // 悬空 DOM 引用检测（本轮实测踩坑）：app.js 里 $("x") 指向的 id 必须在 index.html 存在，
     // 否则 openSettings() 直接抛 TypeError: Cannot set properties of null 导致弹层打不开——
     // 不报错到日志、静态检查也全绿，属 R34/R41 家族的「声明了却没接线」。
     // 例外：creditTip 由 JS 动态创建（见 newCreditTip），故白名单放行。
     (() => {
+      // R129：settingsOverlay 已删除（设置改「其他」Tab），故它不再是悬空引用；
+      // 但 app.js 里若还残留 $("settingsOverlay") 就是真悬空——此处不放行，
+      // 让「忘了删干净」直接变红（上面只剩注释提到它，注释不参与 $() 匹配）。
       const dyn = new Set(["creditTip"]);
       const ids = new Set([...html.matchAll(/id="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
       const missing = [...new Set([...raw.matchAll(/\$\("([A-Za-z0-9_-]+)"\)/g)].map((m) => m[1]))]
@@ -1817,13 +1840,16 @@ const LIVE_FB = [
     }
     return -1;
   };
-  const start = html.indexOf('id="settingsOverlay"');
+  // R129：设置弹层删除、内容并入「其他」Tab ⇒ issue #125 的守护对象换成 mtabOther。
+  // 原缺陷的形态不变：设置区少一个 </div> 会把后面的弹层（含管理登录层）卷进 hidden 父级，
+  // 表现是「打开面板一片空白且点不动」。所以仍要检查它有自己的闭合、且后续弹层在它之外。
+  const start = html.indexOf('id="mtabOther"');
   const closeAt = start < 0 ? -1 : matchClose(html.lastIndexOf("<", start));
   const adminAt = html.indexOf('id="adminLoginOverlay"');
   const need2 = [
     ["index.html 的 <div> 开闭数量配平（少一个 </div> 会把后续弹层全卷进上一层）", opens === closes],
-    ["settingsOverlay 有匹配闭合标签（未闭合即 issue #125 复现）", closeAt >= 0],
-    ["adminLoginOverlay 位于 settingsOverlay **之外**（登录层必须在 body 直系，否则被 hidden 父级压成 0×0）",
+    ["#mtabOther（设置区）有匹配闭合标签（未闭合即 issue #125 同款复现）", closeAt >= 0],
+    ["adminLoginOverlay 位于 #mtabOther **之外**（登录层必须在 body 直系，否则被 hidden 父级压成 0×0）",
       closeAt > 0 && adminAt > closeAt],
   ];
   for (const [label, pass] of need2) {
@@ -1975,14 +2001,17 @@ const LIVE_FB = [
   }
 }
 
-// ---- 场景 4：折线图不得画「全 0 系列」----
-// 背景（用户实测）：某渠道只在一个小时点有量、其余点全 0，图上却有一条贯穿
-// 到底的贴 0 轴长线，既白占图例又把 Y 轴视觉压扁。修法是按「区间总量 > 0」
-// 过滤系列（与 tooltip 过滤 0 值系列同口径）。
+// ---- 场景 4：用量模块改环形 + 占比清单（R129），折线图整体下线 ----
+// 背景（2026-10-29 用户实测）：「那个折线图并不合理，对吧」——用当日真实数据量化：
+//   ① 今日 24 个桶只有 8 个非空，其中 7 个还是「尚未到来的时刻」⇒ 横向 2/3 是空的；
+//   ② 今日主力渠道占 99.4%，另两条 0.6%/0.0% 贴 X 轴肉眼不可见；
+//   ③ 7 日 16 条模型线，前 3 名已占 98.3% ⇒ 读图不如读表。
+// 根因是**图表类型与数据形态不匹配**：折线擅长「趋势」，而用户问的是「谁在吃额度」
+// （占比问题）。故改环形 + 占比清单，并用**单色明度梯按排名取色**（单色后没有色相可用）。
+// 本组断言守的正是这套新结构；旧的「0 值画 null / connectNulls」随折线一起失去对象。
 {
   const need4 = [];
   const check4 = (name, pass, extra = "") => need4.push([name, pass, extra]);
-  // 同 fnBody（上面那个是局部作用域内的，这里需要独立定义）
   const bodyOf = (name) => {
     const at = raw.indexOf(`function ${name}(`);
     if (at < 0) return "";
@@ -1995,38 +2024,40 @@ const LIVE_FB = [
     return "";
   };
 
-  // 函数体源码断言（图表依赖 echarts，stub 环境跑不了真实渲染，
-  // 但「是否按总量过滤」是纯源码性质，可静态锁死）。
-  const usageBody = bodyOf("renderUsageChart");
-  check4("renderUsageChart 函数体可定位", usageBody.length > 200, `len=${usageBody.length}`);
-  check4("token 图按总量过滤掉 0 渠道（active 变量）",
-    /const active = chans\.filter\(\(ch\) => \(totalOf\[ch\] \|\| 0\) > 0\)/.test(usageBody),
-    usageBody.slice(0, 200));
-  check4("token 图的 series 用过滤后的 active（不再直接用 chans）",
-    /const series = active\.map/.test(usageBody) && !/const series = chans\.map/.test(usageBody));
-  check4("token 图的 color 也用过滤后的 active",
-    /color: active\.map\(\(ch\) => chColor\(ch\)\)/.test(usageBody));
-  // 核心：0 值必须画成 null（断点），不能画成 0 —— 否则每个"没跑"的时刻都落一个
-  // 0 点、被直线串成一条贴 X 轴的长线（用户实测的"底部总有一条线"）。
-  check4("token 图把 0 画成 null 断点（不再落 0 点）",
-    /return v > 0 \? v : null;/.test(usageBody),
-    usageBody.slice(usageBody.indexOf("data: byDay.map"), usageBody.indexOf("data: byDay.map") + 120));
-  check4("token 图显式关掉 connectNulls（否则 null 会被跨过连成假线）",
-    /connectNulls: false/.test(usageBody));
-  check4("token 图不再用「|| 0」兜底成 0 点",
-    !/d\.by_channel\[ch\] \|\| 0/.test(usageBody));
+  // 折线图相关符号必须彻底消失（半删最危险：留着 makeChart 仍会去拉 CDN）
+  const deadChart = ["echarts", "makeChart", "renderUsageChart", "renderCreditChart",
+    "usageChart", "creditChart", "usageAxisKeys", "connectNulls"].filter((n) => raw.includes(n));
+  check4("折线图与 echarts 依赖彻底下线（无半删残留）",
+    deadChart.length === 0, deadChart.length ? `残留 ${deadChart.join(", ")}` : "");
+  check4("index.html 不再引用 echarts CDN",
+    !/echarts\.min\.js/.test(html), "仍有 echarts <script>");
 
-  const creditBody = bodyOf("renderCreditChart");
-  check4("renderCreditChart 函数体可定位", creditBody.length > 200, `len=${creditBody.length}`);
-  check4("积分图按总量过滤掉 0 账号",
-    /\.filter\(\(uid\) => \(totals\[uid\] \|\| 0\) > 0\)/.test(creditBody),
-    creditBody.slice(0, 200));
-  check4("积分图同样把 0 画成 null 断点",
-    /return v > 0 \? v : null;/.test(creditBody));
-  check4("积分图同样关掉 connectNulls",
-    /connectNulls: false/.test(creditBody));
-  check4("积分图不再用「|| 0」兜底成 0 点",
-    !/byAcct\[uid\]\[d\] \|\| 0/.test(creditBody));
+  // 环形扇区聚合：前 5 + 其他（扇区超过 6 个就认不出大小差别）
+  const donutBody = bodyOf("renderUsageDonut");
+  check4("renderUsageDonut 函数体可定位", donutBody.length > 300, `len=${donutBody.length}`);
+  check4("环形只取前 5 名 + 「其他」合并（TOP_SLICES 常量）",
+    /const TOP_SLICES = 5/.test(raw) || /TOP_SLICES/.test(donutBody));
+  check4("「其他」档把剩余项求和而不是逐个画",
+    /reduce\(/.test(donutBody) || /slice\(TOP_SLICES\)/.test(donutBody));
+
+  // 排名取色必须走明度梯，且**第 1 名最亮**（读图时「越亮 = 越大」要成立）。
+  // donutSVG/sliceRows 是 helper，故判据是「renderUsageDonut 接线到它们，且全程不用 chColor」。
+  const donutSVGBody = bodyOf("donutSVG"), sliceRowsBody = bodyOf("sliceRows");
+  check4("按排名取明度梯色（rampColor），不用渠道色",
+    /donutSVG\(/.test(donutBody) && /sliceRows\(/.test(donutBody) &&
+    /rampColor\(/.test(donutSVGBody) && /rampColor\(/.test(sliceRowsBody) &&
+    !/chColor\(/.test(donutBody + donutSVGBody + sliceRowsBody));
+  check4("rampColor 读 --ch-ramp-* 变量且封顶第 6 档",
+    /--ch-ramp-\$\{/.test(raw) && /Math\.min\(Math\.max\(i, 0\), 5\)/.test(raw));
+
+  // 缓存命中率：未上报必须是「未上报」而不是 0%（否则把「不知道」说成「命中率 0」）
+  check4("缓存命中未上报时显示「未上报」而非 0%",
+    /未上报/.test(sliceRowsBody) && /cr_cov/.test(sliceRowsBody) &&
+    !/cr_cov\s*\|\|\s*1\)/.test(sliceRowsBody));
+
+  // 积分维度复用同一结构（不重做一套），只是换数据源
+  check4("积分维度复用同一环形结构（不另造一套）",
+    /function renderCreditDonut/.test(raw) || /mode === "credit"/.test(raw));
 
   for (const [label, pass, extra] of need4) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
@@ -2034,13 +2065,13 @@ const LIVE_FB = [
   }
 }
 
-// ---- 场景 4.5：横轴固定整窗刻度（R98）----
-// 背景（用户实测）：今日视图只画到当前小时（截图里 11 点就只剩 00:00~11:00），
-// 横轴长度随时刻变化、刻度本身也在变，无法横向比较。修法是后端按窗口全枚举
-// 补空桶，前端只消费不再自算（口径单一来源），积分图也用同一份刻度。
+// ---- 场景 4.6：首页「最近在用」（R130）----
+// 该列表的两个字段口径不同，混淆会让界面说错话：
+//   · last_ts 是绝对时刻（跨天保留）→ 决定排序与「几小时前」
+//   · reqs/tokens 是今日量（跨天清零）→ 今日没跑必须显示「今日未用」，不是 0
 {
-  const need45 = [];
-  const check45 = (name, pass, extra = "") => need45.push([name, pass, extra]);
+  const need46 = [];
+  const check46 = (name, pass, extra = "") => need46.push([name, pass, extra]);
   const bodyOf = (name) => {
     const at = raw.indexOf(`function ${name}(`);
     if (at < 0) return "";
@@ -2052,26 +2083,38 @@ const LIVE_FB = [
     }
     return "";
   };
+  const rb = bodyOf("renderHomeRecent");
+  check46("首页有「最近在用」渲染函数且接线到统计刷新",
+    rb.length > 300 && /renderHomeRecent\(\)/.test(raw));
+  check46("数据源是 recent_models（不是拿 models 今日排行冒充）",
+    /recent_models/.test(rb) && !/lastStats\.models/.test(rb));
+  check46("按 last_ts 排序口径来自后端（前端不再二次排序）",
+    !/\.sort\(/.test(rb));
+  check46("今日没跑的模型显示「今日未用」而不是 0",
+    /今日未用/.test(rb));
+  check46("相对时间有「超过 24h 回落绝对日期」分支",
+    /86400/.test(raw) && /function relTime/.test(raw) &&
+    /fmtClock\(ts\)\.split/.test(raw));
+  check46("时钟漂移不出负数（未来时刻显示「刚刚」）",
+    /if \(sec < 0\) return "刚刚"/.test(raw));
+  for (const [label, pass, extra] of need46) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
+    if (!pass) failed++;
+  }
+}
 
-  const axisBody = bodyOf("usageAxisKeys");
-  check45("usageAxisKeys 函数体可定位", axisBody.length > 100, `len=${axisBody.length}`);
-  check45("今日视图固定 24 个小时桶（与「当前几点」无关）",
-    /for \(let h = 0; h < 24; h\+\+\)/.test(axisBody), axisBody.slice(0, 160));
-  check45("多日视图按窗口天数逐日枚举（缺数据的日子也有刻度）",
-    /for \(let i = days - 1; i >= 0; i--\)/.test(axisBody), axisBody.slice(0, 160));
-
-  const usageBody = bodyOf("renderUsageChart");
-  check45("token 图横轴直接用后端下发的 by_day（不在前端另算）",
-    /const dates = byDay\.map\(\(d\) => d\.date\)/.test(usageBody));
-
-  const creditBody = bodyOf("renderCreditChart");
-  check45("积分图横轴用 usageAxisKeys（与 token 图同刻度）",
-    /const dates = usageAxisKeys\(usageDays\)/.test(creditBody), creditBody.slice(0, 300));
-  check45("积分图不再用「只含有消耗的时段」建横轴",
-    !/new Set\(spends\.map\(\(e\) => fmtDay\(e\.ts\)\)\)/.test(creditBody));
-  check45("积分图今日视图按小时归桶（fmtHour）",
-    /usageDays === 1 \? fmtHour\(ts\) : fmtDay\(ts\)/.test(creditBody));
-
+// ---- 场景 4.5：R98「固定整窗刻度」随折线图下线 ----
+// R98 约束的是「折线图横轴必须整窗补空桶」。折线图没了，横轴不存在，
+// 该约束**不再适用**（属实质减少，已在 docs/决议项.md R129 注明）。
+// 但 R98 想防的**根因**仍然存在：后端 `ledger.Query` 补空桶的口径不许被前端篡改。
+// 故保留一条：后端仍是唯一刻度来源（前端不得自算时间轴）。
+{
+  const need45 = [];
+  const check45 = (name, pass, extra = "") => need45.push([name, pass, extra]);
+  check45("前端不再自算时间轴（时间桶只由后端 ledger.Query 补齐）",
+    !raw.includes("usageAxisKeys") && !/for \(let h = 0; h < 24; h\+\+\)/.test(raw));
+  check45("后端仍按整窗补空桶（days=1 补 24 个小时桶）",
+    /for h := 0; h < 24; h\+\+/.test(readFileSync(new URL("../internal/ledger/ledger.go", import.meta.url), "utf8")));
   for (const [label, pass, extra] of need45) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
     if (!pass) failed++;
@@ -2154,17 +2197,23 @@ const LIVE_FB = [
     const block = css.slice(at, end);
     return /appearance:\s*none/.test(block) && /background-image:\s*linear-gradient\(45deg/.test(block);
   })());
-  check5("设置里不再有自定义模型配置 UI（R86：只从主工具栏入口进）", (() => {
-    const a = html.indexOf('id="settingsOverlay"');
-    const b = html.indexOf('id="customModelsOverlay"');
-    if (a < 0 || b < 0 || b < a) return false;
-    // 设置弹层这一段里不能出现自定义模型的配置元素
+  check5("设置区里不再有自定义模型配置 UI（R86：只从主工具栏入口进）", (() => {
+    // R129：设置区从弹层变成 #mtabOther 一页，判据范围随之改为该容器到「其他」页结束。
+    const a = html.indexOf('id="mtabOther"');
+    const b = html.indexOf("</section>", a);
+    if (a < 0 || b < 0) return false;
     const seg = html.slice(a, b);
     return !seg.includes('id="customChList"') && !seg.includes('id="btnCustomAdd"');
   })());
-  // 宽度规范：设置保持原样，用户明确要求「宽度也不改」
-  check5("设置弹窗保持原来的 modal-wide（720px，R86 用户要求不动宽度）",
-    /<div class="overlay hidden" id="settingsOverlay">\s*<div class="modal modal-wide">/.test(html));
+  // R129：设置不再是弹层，故「保持 720px 弹窗宽度」这条失去对象。
+  // 改为守真正还在的约束：设置页不得再出现 overlay/modal 外壳（退回弹层即失败）。
+  check5("设置是页而非弹层（#mtabOther 内无 overlay/modal 外壳）", (() => {
+    const a = html.indexOf('id="mtabOther"');
+    const b = html.indexOf("</section>", a);
+    if (a < 0 || b < 0) return false;
+    const seg = html.slice(a, b);
+    return !/class="overlay/.test(seg) && !/class="modal/.test(seg);
+  })());
   check5("弹窗宽度只有三档（.modal / .modal-wide / .modal-xwide）",
     (css.match(/^\.modal(?:\.modal-(?:wide|xwide|search))? \{/gm) || []).length <= 5 &&
     /\.modal\.modal-xwide \{[^}]*width: 1180px/.test(css));
@@ -2406,36 +2455,58 @@ const LIVE_FB = [
   const CH = [...new Set(Object.values(CH_CLASS)), "custom"];
   const BUILTIN_CH = Object.values(CH_CLASS);
 
-  checkPal(`${BUILTIN_CH.length} 个内建渠道都有 --ch-* 颜色变量`,
-    BUILTIN_CH.every((c) => new RegExp(`--ch-${c}:\\s*#[0-9a-fA-F]{6}`).test(css)));
+  // R99 v3（2026-10-29）：渠道色由「23 个品牌色」收口为「单一 --ch」。
+  // 断言意图从「每个渠道都配了色」改为「只有一处渠道色、且没有任何 --ch-<类名> 残留」——
+  // 后者才是当前必须守的不变量：一旦有人补回 --ch-<类名>，chColor() 又不读它，
+  // 就会变成「CSS 里配了色但界面不生效」的死配置（R99 历史上踩过同一坑）。
+  const legacyChVars = [...css.matchAll(/--ch-([a-z]+):/g)].map((m) => m[1])
+    .filter((n) => !/^ramp-\d$/.test(n));
+  checkPal("渠道色只有单一 --ch，没有任何 --ch-<类名> 残留",
+    /--ch:\s*#[0-9a-fA-F]{6}/.test(css) && legacyChVars.length === 0,
+    legacyChVars.length ? `残留 ${legacyChVars.join(", ")}` : "");
 
-  // .badge.custom 也必须在扫描范围内（它是兜底色，同样不许写死 hex）。
-  checkPal(".badge.x 全部走 var(--ch-x)，CSS 里不再硬编码渠道色",
-    CH.every((c) => new RegExp(`\\.badge\\.${c}\\s*\\{\\s*background:\\s*var\\(--ch-${c}\\);`).test(css)),
-    CH.filter((c) => !new RegExp(`\\.badge\\.${c}\\s*\\{\\s*background:\\s*var\\(--ch-${c}\\);`).test(css)).join(", "));
+  // 徽章不再逐渠道配色（全部同底），但必须守住两条：
+  //   ① 徽章的底与前景来自 CSS 变量（不许出现写死的渠道 hex）；
+  //   ② 渠道短类名在 CSS 里**至少有一处**被引用——否则 .wb/.glm 这类类名成了纯装饰，
+  //      而 applyAcctFilter 的 data-group 之外，费率表与卡片仍按类名命中样式。
+  checkPal("徽章底色来自变量（无写死渠道 hex）",
+    /\.badge\s*\{[^}]*background:\s*var\(--/s.test(css),
+    "style.css 的 .badge 未用变量底色");
+  // 类名必须有渲染点：chBadge 拼 `class="badge ${chClass(k)}"`，否则渠道类名成了死数据。
+  checkPal("徽章仍拼渠道短类名（class=\"badge <类名>\"）",
+    /class="badge \$\{chClass\(k\)\}"/.test(raw) &&
+    /const chClass = \(k\) => CH_CLASS\[k\] \|\| "custom"/.test(raw),
+    "chBadge 未拼渠道类名");
 
   // 徽章只有 chBadge() 一个出口：任何手写的 `<span class="badge ...">` 都会让
   // 自定义渠道退回 .badge.custom 的单色、并让卡片筛选失效（账号卡片曾长期手拼）。
   // 旧断言只查 `class="badge ${chClass(` —— 那写法根本不存在，等于空断言。
   // 先剥注释（chBadge 的说明文字里就举了反例写法），再排除 chBadge 自身的实现行。
+  // 徽章只有一个出口：任何手写的 `<span class="badge ...">` 都会绕过 chBadge()、
+  // 丢掉渠道类名，并让卡片筛选（data-group 之外的那些按类名命中的样式）失效。
   const rawNoComment = raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   const handBadge = [...rawNoComment.matchAll(/<span class="badge[ "`]/g)]
-    .filter((m) => !/style="background:\$\{chColor\(k[^)]*\)\}"/.test(rawNoComment.slice(m.index, m.index + 120)));
-  checkPal("徽章统一经 chBadge() 渲染（底色 = chColor()，与折线同源）",
-    /function chBadge\(k, list\) \{/.test(raw) &&
-    raw.includes("style=\"background:${chColor(k, list)}\"") &&
+    .filter((m) => !/class="badge \$\{chClass\(k\)\}"/.test(rawNoComment.slice(m.index, m.index + 120)));
+  checkPal("徽章统一经 chBadge() 渲染（唯一出口，含渠道类名）",
+    /function chBadge\(k\) \{/.test(raw) &&
+    /return `<span class="badge \$\{chClass\(k\)\}">/.test(raw) &&
     handBadge.length === 0,
     handBadge.length ? `仍有 ${handBadge.length} 处手拼徽章` : "");
 
-  checkPal("自定义渠道色按序号黄金角均分，不用固定色池取模",
-    raw.includes("const CUSTOM_GOLDEN_ANGLE = 137.508") &&
-    raw.includes("customChannelColor(k, list)") &&
-    !raw.includes("CUSTOM_PALETTE["));
+  // R99 v3：黄金角自适应色机制整体下线（渠道统一单色）。
+  // 断言意图反转：从「必须用黄金角」改为「必须彻底没有残留」——半删最危险，
+  // customChannelColor 若还留着，chColor 里那条分支会继续返回与 --ch 不同的色，
+  // 于是自定义渠道的徽章点、图表 series 与其它渠道不一致且无人察觉。
+  const deadColoring = ["CUSTOM_GOLDEN_ANGLE", "_customColorCache", "relLuminance",
+    "customChannelColor", "varyColor", "hexToHsl", "hslToHex"].filter((n) => raw.includes(n));
+  checkPal("自定义渠道黄金角配色机制已彻底下线（无半删残留）",
+    deadColoring.length === 0, deadColoring.length ? `残留 ${deadColoring.join(", ")}` : "");
 
-  // 自定义渠道取色缓存必须带序号：只按渠道名缓存时，删/调序后同名渠道会返回
-  // 过期颜色（与列表序号对不上，且可能与其他渠道撞色）。
-  checkPal("自定义渠道色缓存键含序号（删/调序后不会返回过期颜色）",
-    raw.includes("const ck = `${k}#${idx}`") && raw.includes("_customColorCache[ck]"));
+  // chColor 必须只读单一 --ch，且签名不再接受 list（传 list 的旧调用点说明还有分支）
+  checkPal("chColor 只取单一 --ch（不按渠道分支、不接受 list 参数）",
+    /function chColor\(\) \{/.test(raw) &&
+    /getPropertyValue\("--ch"\)/.test(raw) &&
+    !/--ch-\$\{cls\}/.test(raw));
 
   // 账号卡片的筛选靠 data-group（渠道 key），不靠徽章类名：自定义渠道的短类名
   // 一律是 custom，拿类名反查会把它们全归到同一个 key 上（且 CLS_KIND 里没有 custom）。
@@ -2444,9 +2515,12 @@ const LIVE_FB = [
     raw.includes("card.dataset.group") &&
     !raw.includes("CLS_KIND"));
 
-  checkPal("自定义渠道色白字对比度自动达标（黄/绿色相压暗到 ≥4.5）",
-    raw.includes("for (let l = 42; l >= 22; l--)") &&
-    raw.includes("1.05 / (relLuminance(hex) + 0.05) >= 4.5"));
+  // 原断言守的是「黄金角动态压暗保证白字 ≥4.5」——机制删了就无对象。
+  // 现在必须守的是另一端：徽章文字用 --fg（不是写死 #fff），因为统一底色
+  // #2b243f 上白字只有 2.72:1（不达标），而 --fg 有 12.37:1。
+  checkPal("徽章文字用 var(--fg) 而非写死白字（统一底色上白字对比不足）",
+    /\.badge\s*\{[^}]*color:\s*var\(--fg\)/s.test(css) &&
+    !/\.badge\s*\{[^}]*color:\s*#fff/s.test(css));
 
   // 内建 21 色两两可辨：完全同色会导致图上两条线重叠（原 zcode/qwenwork、
   // gemini/wb、codearts/qoder、lobsterai/loomy 四对完全相同）
@@ -2460,14 +2534,22 @@ const LIVE_FB = [
   for (let i = 0; i < names.length; i++)
     for (let j = i + 1; j < names.length; j++)
       if (hexOf[names[i]] === hexOf[names[j]]) dup.push(`${names[i]}=${names[j]}`);
-  checkPal("21 个内建渠道色两两不同（无完全同色）", dup.length === 0, dup.join(", "));
+  // 单色后「两两不同」不再有意义；改为守「只有一个渠道色，且没有任何重复/多余定义」。
+  // dup 的计算仍保留（它对 --ch-ramp-* 依然有效：六档明度梯不许有两个档同色，
+  // 否则环形图上相邻两档会糊成一块，看不出排名）。
+  checkPal("明度梯六档互不相同（相邻档同色会让环形糊成一块）", dup.length === 0, dup.join(", "));
 
-  checkPal("渠道按钮配色全部走 var(--ch-*)，CSS 里无硬编码 hex",
-    !/\.btn\.primary\.alt[^{]*\{[^}]*#[0-9a-fA-F]{6}/.test(css));
+  // 单色后按钮不再按渠道取色；hover 用一个中性底 #2a2438（不是渠道色）。
+  // 守的是「按钮规则里不出现 --ch-<类名>」，以及「不出现每个渠道一条 hex」的旧形态。
+  checkPal("渠道按钮不再按渠道取色（无 --ch-<类名>、无逐渠道 hex）",
+    !/--ch-[a-z]+/.test((css.match(/\.btn\.primary\.alt[^{]*\{[^}]*\}/g) || []).join("")) &&
+    [...css.matchAll(/^\.btn\.primary\.alt\.([a-z]+)\s*\{/gm)].length === 0);
 
-  checkPal("每个渠道按钮都有专属 .btn.primary.alt.<类名> 规则",
-    CH.every((c) => new RegExp(`\\.btn\\.primary\\.alt\\.${c}\\s*\\{`).test(css)),
-    CH.filter((c) => !new RegExp(`\\.btn\\.primary\\.alt\\.${c}\\s*\\{`).test(css)).join(", "));
+  // 按钮不再逐渠道配色；守的是「统一规则存在」+「按钮上仍带渠道类名」
+  // （类名给 hover/未来差异化留钩子，也让 index.html 的 alt 修饰类断言继续有意义）。
+  checkPal("渠道按钮只有一条统一配色规则（无 24 条逐渠道复制）",
+    /\.btn\.primary\.alt\s*\{/.test(css) &&
+    [...css.matchAll(/^\.btn\.primary\.alt\.([a-z]+)\s*\{/gm)].length === 0);
 
   // 渠道按钮必须带 `alt <渠道短类名>`。两种漏法都要拦：
   //   ① 完全裸的 `btn primary`（btnAddWB 曾如此，靠 --primary 恰好等于 --ch-wb 蒙对）；
@@ -2554,38 +2636,25 @@ const LIVE_FB = [
       !/const CH_NAMES\b/.test(raw) && /const chLabel = \(k\) => CH_LABEL\[k\]/.test(raw));
 
     // 5) 配色规范文档必须与 CSS 实际色值一致（R99 文档化）。
-    // 为什么需要：docs/渠道配色规范.md 把 21 个色值当「规范基线」公布，一旦有人改
-    // CSS 不改文档，文档就变成错误信息（比没文档更糟——后来者会按错的基线去改）。
-    // 这里逐行比对 §3 色值表的 hex 与 :root 的 --ch-*，任一不一致即失败。
+    // 单色后逐值比对已无意义（只有一个 --ch），改为守三件事：
+    //   ① 文档仍在且明确声明「单一 --ch」；
+    //   ② 文档里写的 --ch 值与 style.css 的 :root 逐字一致（改 CSS 不改文档仍然要红）；
+    //   ③ 文档不再保留「23 色基线表」这类会误导后来者的旧内容。
     {
       const docPath = new URL("../docs/渠道配色规范.md", import.meta.url);
       let doc = "";
       try { doc = readFileSync(docPath, "utf8"); } catch (e) { /* 缺文档下面会报 */ }
-      const rootHex = {};
-      for (const m of css.matchAll(/--ch-([a-z]+):\s*(#[0-9a-fA-F]{6})/g)) rootHex[m[1]] = m[2].toLowerCase();
-      // 表格行形如：| 1 | `traecode` | `traecode` | TraeCode | `#0284c7` | 4.10 | ...
-      // 第 2 格是 **CSS 短类名**（对应 `--ch-<类名>`），第 3 格是渠道 key。
-      // 按格切分而不是写死整行形状：表头列数以后还会变（加指标列），
-      // 写死正则会让“只是加了列”也变成测试失败（假失败同样是噪声）。
-      const docHex = {};
-      for (const line of doc.split("\n")) {
-        if (!/^\|\s*\d+\s*\|/.test(line)) continue;
-        const cells = line.split("|").map((c) => c.trim());
-        const cls = (cells[2] || "").replace(/`/g, "");
-        const hex = (line.match(/`(#[0-9a-fA-F]{6})`/) || [])[1];
-        if (cls && hex) docHex[cls.toLowerCase()] = hex.toLowerCase();
-      }
-      const keys = Object.keys(rootHex).filter((k) => k !== "custom");
-      const missing = keys.filter((k) => !docHex[k]);
-      const drift = keys.filter((k) => docHex[k] && docHex[k] !== rootHex[k])
-        .map((k) => `${k}: CSS ${rootHex[k]} ≠ 文档 ${docHex[k]}`);
-      const extra = Object.keys(docHex).filter((k) => !rootHex[k])
-        .map((k) => `文档有但 CSS 无: ${k}`);
-      checkPal("配色规范文档的色值表与 :root 的 --ch-* 逐个一致（改色必须同步文档）",
-        doc !== "" && missing.length === 0 && drift.length === 0 && extra.length === 0,
+      const cssCh = (css.match(/--ch:\s*(#[0-9a-fA-F]{6})/) || [])[1] || "";
+      // 文档里的写法是代码块 `:root { --ch: #a098be; }`，不一定带反引号包裹变量名，
+      // 故宽松匹配「--ch: #hex」（不带 -<类名>）。
+      const docCh = (doc.match(/\{?\s*`?--ch:\s*(#[0-9a-fA-F]{6})/) || [])[1] || "";
+      const staleBaseline = /21 个内建渠道的色值即\*\*规范基线\*\*|规范色值表（21 个内建渠道）/.test(doc);
+      checkPal("配色规范文档声明单一 --ch 且色值与 CSS 一致",
+        doc !== "" && docCh !== "" && cssCh.toLowerCase() === docCh.toLowerCase() && !staleBaseline,
         [doc === "" ? "缺 docs/渠道配色规范.md" : "",
-         missing.length ? `文档缺 ${missing.join(", ")}` : "",
-         ...drift, ...extra].filter(Boolean).join("; "));
+         docCh === "" ? "文档未写 `--ch: #hex`" : "",
+         cssCh && docCh && cssCh.toLowerCase() !== docCh.toLowerCase() ? `CSS ${cssCh} ≠ 文档 ${docCh}` : "",
+         staleBaseline ? "文档仍保留 23 色基线表（已作废）" : ""].filter(Boolean).join("; "));
     }
   }
 

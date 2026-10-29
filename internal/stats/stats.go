@@ -208,6 +208,7 @@ type Snapshot struct {
 	ExpireTomorrow  int64           `json:"expire_tomorrow"`   // 全池明日到期额度合计
 	Platforms       []PlatformRow   `json:"platforms"`         // 各平台今日情况（余额降序）
 	Models          []ModelStat     `json:"models"`            // 今日按模型消耗（积分降序）
+	RecentModels    []ModelRecent   `json:"recent_models"`     // 最近在用（时刻降序，跨天保留）
 	Expiry          []ExpiryRow     `json:"expiry"`            // 最近临期（到期日升序）
 	Rotation        []RotationView  `json:"rotation"`          // 使用中 / 接棒顺序
 	Abnormal        []AbnormalRow   `json:"abnormal"`          // 异常账号（无异常为空，前端隐藏区块）
@@ -293,6 +294,13 @@ type Stats struct {
 	models    map[string]*modelEntry
 	milestone int
 
+	// modelLastUsed 模型 → 最近一次成功记账的 unix 秒。
+	// **跨天保留**：s.models 每跨天清零归档进 modelDays，但「最近在用」问的是
+	// 「我上一次跑这个模型是什么时候」，跨天清零会让「今早还没跑」时列表全空
+	// （最常见的场景：早上打开面板想接着昨天的活干）。故单列一份、不进 rollDay 重置。
+	// key 与 s.models 同形（`channel/model`），值为绝对时刻，不需要 day 守卫。
+	modelLastUsed map[string]int64
+
 	toasts []Toast
 	seq    int64
 	ring   []ReqRow
@@ -325,6 +333,7 @@ func New(dataDir string, logf func(format string, args ...any)) (*Stats, error) 
 		reqDays:        map[string]int64{},
 		modelDays:      map[string]map[string]*modelEntry{},
 		models:         map[string]*modelEntry{},
+		modelLastUsed:  map[string]int64{},
 		ring:           make([]ReqRow, 0, ringCap),
 		logf:           logf,
 	}
@@ -831,6 +840,37 @@ func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
 	return out
 }
 
+// recentModelsLocked 「最近在用」列表（调用方须持锁）。
+//
+// 排序：lastUsed 降序（最近在前）；**同一时刻按模型名升序**——不加这一级，
+// map 遍历顺序随机会让「同一批请求的两个模型」每次刷新互换位置，列表看着在抖。
+// 今日 reqs/tokens 从 s.models 补齐（今日没跑 = 0，前端显示「今日未用」而不是
+// 假装它有量）。跨天保留的只有时刻，号码本身不跨天，避免把昨天的量算进今天。
+func (s *Stats) recentModelsLocked() []ModelRecent {
+	if len(s.modelLastUsed) == 0 {
+		return []ModelRecent{}
+	}
+	out := make([]ModelRecent, 0, len(s.modelLastUsed))
+	for model, ts := range s.modelLastUsed {
+		row := ModelRecent{Model: model, LastTS: ts}
+		if e, ok := s.models[model]; ok {
+			row.Reqs = e.reqs
+			row.Tokens = e.tokens
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastTS != out[j].LastTS {
+			return out[i].LastTS > out[j].LastTS
+		}
+		return out[i].Model < out[j].Model
+	})
+	if len(out) > recentModelsLimit {
+		out = out[:recentModelsLimit]
+	}
+	return out
+}
+
 // rotationLocked 生成「使用中 / 接棒顺序」视图（调用方须持锁）。
 // 排序复刻上游 pool 选号三级排序（R112）：**仍有效的最早到期时刻**升序 → 同到期时刻
 // uid 升序 → 无到期信息者按余额降序；与 `pool.entryBetter` 逐条同口径，
@@ -1043,6 +1083,7 @@ func (s *Stats) Snapshot(now time.Time) Snapshot {
 		ExpireTomorrow:  expireTomorrow,
 		Platforms:       platforms,
 		Models:          models,
+		RecentModels:    s.recentModelsLocked(),
 		Expiry:          s.expiryRowsLocked(now),
 		Rotation:        s.rotationLocked(),
 		Abnormal:        s.abnormalRowsLocked(now),

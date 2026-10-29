@@ -23,6 +23,9 @@ type persistJSON struct {
 	Events      map[string]int64                   `json:"events,omitempty"`       // 今日签到事件收入 uid|day -> 数额
 	ModelDays   map[string]map[string]modelPersist `json:"model_days,omitempty"`   // 历史日 -> 模型 -> 消耗（跨天归档）
 	TodayModels *dayModelsPersist                  `json:"today_models,omitempty"` // 今日模型消耗（day 守卫，重启恢复）
+	// ModelLastUsed 模型 → 最近使用 unix 秒。**无 day 守卫**：跨天、跨重启都要留，
+	// 语义是「我上次跑它是什么时候」，清零会让首页「最近在用」在每天早上变空。
+	ModelLastUsed map[string]int64 `json:"model_last_used,omitempty"`
 }
 
 // modelPersist 单模型消耗落盘形态（与内存 modelEntry 同口径，字段一一对应）。
@@ -127,6 +130,16 @@ func (s *Stats) load() error {
 		}
 	}
 	// 历史每日模型消耗（跨天归档）
+	if len(p.ModelLastUsed) > 0 {
+		s.modelLastUsed = make(map[string]int64, len(p.ModelLastUsed))
+		for k, v := range p.ModelLastUsed {
+			if v <= 0 {
+				continue // 零/负时刻视为脏数据：留着会让它永远排在「刚刚」之外又占名额
+			}
+			s.modelLastUsed[k] = v
+		}
+	}
+
 	for day, mm := range p.ModelDays {
 		m2 := make(map[string]*modelEntry, len(mm))
 		for name, mp := range mm {
@@ -161,6 +174,14 @@ func (s *Stats) flushLocked() {
 		p.TodayModels = &dayModelsPersist{Day: s.today, Models: tm}
 	}
 	// 历史每日模型消耗
+	if len(s.modelLastUsed) > 0 {
+		ml := make(map[string]int64, len(s.modelLastUsed))
+		for k, v := range s.modelLastUsed {
+			ml[k] = v
+		}
+		p.ModelLastUsed = ml
+	}
+
 	if len(s.modelDays) > 0 {
 		md := make(map[string]map[string]modelPersist, len(s.modelDays))
 		for day, mm := range s.modelDays {

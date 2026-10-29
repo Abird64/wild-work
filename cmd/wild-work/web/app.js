@@ -900,91 +900,40 @@ const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traewor
 const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", doubao: "doubao", doubaowork: "doubaowork" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
-// ---------- 图表配色：与徽章同源，但保证同图任意两条线颜色可辨 ----------
-// 自定义渠道无品牌色，多个自定义渠道若共用 --ch-custom 会完全撞色，故按
-// 「在 state.custom_channels 里的序号」用黄金角均分色相（不绑品牌色）。
-// 不用固定长度色池：色池在渠道数超过池长时必然撞色，哈希取模也可能让少量
-// 渠道就落进同一桶。黄金角（137.508°）保证任意数量下相邻序号色相间隔最大；
-// 明度从 42% 往下压到白字对比 ≥4.5（黄/绿色相天然更亮，需压更多）。
-// ⚠️ 这些色只保证**彼此**可辨，与内建 --ch-* 色板存在 ΔE2000 < 7 的近邻
-//   （前几个序号恰好贴着 officeace / cline / traecode / minimax），同图出现时
-//   仍可能混淆 —— 内建色板改色后需重新核对这一交叉。
-const CUSTOM_GOLDEN_ANGLE = 137.508;
-const _customColorCache = {};
-function relLuminance(hex) {
-  const v = [1, 3, 5].map((i) => parseInt(hex.substr(i, 2), 16) / 255)
-    .map((c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
-  return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-}
-function customChannelColor(k, list) {
-  // list 显式传入用于「自定义渠道编辑弹窗」：那里渲染的是 editCustomChannels（未保存的
-  // 新渠道也在里面），不能读 state.custom_channels —— 否则新渠道一律 idx=0、全同色。
-  const arr = list || (state && state.custom_channels) || [];
-  const found = arr.findIndex((c) => c && c.name === k);
-  const idx = found < 0 ? arr.length : found;
-  // 缓存键必须带 idx：按序号取色，删/调序后同名渠道的色号会变，
-  // 只按渠道名缓存会返回过期颜色（两个渠道撞色且与列表序号对不上）。
-  const ck = `${k}#${idx}`;
-  if (_customColorCache[ck]) return _customColorCache[ck];
-  const hue = (idx * CUSTOM_GOLDEN_ANGLE) % 360;
-  // 明度从 42% 逐级下压，直到白字对比 ≥4.5（黄/绿最亮，要压到 28% 左右）
-  let hex = hslToHex(hue, 78, 42);
-  for (let l = 42; l >= 22; l--) {
-    hex = hslToHex(hue, 78, l);
-    if (1.05 / (relLuminance(hex) + 0.05) >= 4.5) break;
-  }
-  return (_customColorCache[ck] = hex);
-}
-const _chColorCache = {};
-function chColor(k, list) {
-  if (isCustomGroup(k) || (list && list.some((c) => c && c.name === k))) {
-    return customChannelColor(k, list);
-  }
-  const cls = CH_CLASS[k] || "custom";
-  if (_chColorCache[cls]) return _chColorCache[cls];
+// ---------- 渠道配色：单一色（R99 v3，2026-10-29 用户裁决）----------
+// 改动前：23 个 --ch-<类名> 品牌色，外加自定义渠道按序号取色相、逐级压暗保证白字的
+// 自适应配色函数（合计约 60 行机制代码）。两者均已删除。
+// 为什么删：① 渠道身份由 chLabel() 的文字承载，色相是多余的第二编码；② 暗色底上
+// 23 个色相必然拥挤（原浅色板搬到 #131118，23 个里 21 个低于 4.5:1）；③ 维护成本——
+// 新增渠道曾要求同时补 --ch-<类名> + .badge.x + .btn.primary.alt.x 三处，漏一处就静默回退。
+// 现在所有渠道色一律取 --ch（CSS 里的单一变量），自定义渠道也用同一色。
+// 渠道短类名（CH_CLASS）**保留**：HTML 上仍拼 `class="badge wb"`，applyAcctFilter 靠
+// data-group 筛选，其它样式规则也仍按类名命中。
+// rampColor(i) 取明度梯第 i 档（0 起，超出封顶到第 6 档）。
+// 单色方案里图表靠「明度排名」而不是「色相」区分系列，故与 --ch 是两套变量。
+const RAMP_FALLBACK = ["#d4c8fe", "#bda7fe", "#a688f4", "#8e6fd8", "#7757be", "#613fa3"];
+const _rampCache = [];
+function rampColor(i) {
+  const k = Math.min(Math.max(i, 0), 5);
+  if (_rampCache[k]) return _rampCache[k];
   let v = "";
-  try { v = getComputedStyle(document.documentElement).getPropertyValue(`--ch-${cls}`).trim(); } catch (e) { /* ignore */ }
-  return (_chColorCache[cls] = v || "#6366f1");
+  try { v = getComputedStyle(document.documentElement).getPropertyValue(`--ch-ramp-${k + 1}`).trim(); } catch (e) { /* ignore */ }
+  return (_rampCache[k] = v || RAMP_FALLBACK[k]);
 }
 
-// chBadge 渠道徽章的唯一渲染入口（R99）：
-//   底色一律取 chColor()，与折线图 series 同源——两处不可能漂移。
-//   内建渠道的 chColor() 读 --ch-<类名>（CSS 里仍有 .badge.x 做无 JS 兜底），
-//   自定义渠道读 customChannelColor() 的黄金角自适应色，故必须内联 background
-//   （否则它们全共用 .badge.custom 的单一革蓝，与图上颜色对不上）。
-// ⚠️ 全仓只此一处拼 badge 的 class 与底色：手写 `<span class="badge x">` 会让
-//   自定义渠道退回 .badge.custom、并让 applyAcctFilter 的类名反查失效。
-function chBadge(k, list) {
-  return `<span class="badge ${chClass(k)}" style="background:${chColor(k, list)}">${esc(chLabel(k))}</span>`;
+const _chColorCache = {};
+function chColor() {
+  if (_chColorCache.single) return _chColorCache.single;
+  let v = "";
+  try { v = getComputedStyle(document.documentElement).getPropertyValue("--ch").trim(); } catch (e) { /* ignore */ }
+  return (_chColorCache.single = v || "#a098be");
 }
-// varyColor 同渠道第 i（0 起）个系列做颜色变体，避免同渠道多条线同色：
-// 明度阶梯 +14/-14/+28/-28... 封顶在 [22,78]；封顶后转色相偏移（每档 ±18°）继续拉开。
-function hexToHsl(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
-  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
-  if (mx === mn) return { h: 0, s: 0, l: l * 100 };
-  const d = mx - mn, s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
-  let h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return { h: h * 60, s: s * 100, l: l * 100 };
-}
-function hslToHex(h, s, l) {
-  const f = (n) => {
-    const k2 = (n + h / 30) % 12;
-    const a = (s / 100) * Math.min(l / 100, 1 - l / 100);
-    const c = l / 100 - a * Math.max(-1, Math.min(k2 - 3, Math.min(9 - k2, 1)));
-    return Math.round(c * 255).toString(16).padStart(2, "0");
-  };
-  return `#${f(0)}${f(8)}${f(4)}`;
-}
-function varyColor(hex, i) {
-  if (!i || !/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
-  const { h, s, l } = hexToHsl(hex);
-  const k = Math.ceil(i / 2), dir = i % 2 ? 1 : -1;
-  const lRaw = l + k * 14 * dir;
-  const l2 = Math.min(78, Math.max(22, lRaw));
-  const hShift = (lRaw < 22 || lRaw > 78) && k >= 2 ? k * 18 * dir : 0;
-  return hslToHex(((h + hShift) % 360 + 360) % 360, s, l2);
+
+// 渠道徽章的唯一渲染入口（R99）：全仓只此一处拼 badge。
+// 底色/圆点色一律来自 CSS 的 --ch（不再内联 background，因为所有渠道同色）；
+// 只保留渠道类名，供筛选与后续样式命中。
+function chBadge(k) {
+  return `<span class="badge ${chClass(k)}">${esc(chLabel(k))}</span>`;
 }
 // 不支持显式签到（手动按钮）的渠道：
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
@@ -1387,6 +1336,8 @@ function renderAccounts() {
       </div>
     </div>`;
   }).join("");
+  // R129：账号池变化会改变三场景的「可用账号数」，故一并刷新首页摘要（只读、无额外请求）。
+  renderHomeScenes();
 }
 
 function renderTimes() {
@@ -3784,15 +3735,16 @@ async function openSettings() {
   $("chkLoopGuard").checked = state.loop_guard !== false; // 缺省（旧后端）按开启显示
   $("chkBodyLog").checked = !!state.body_log;
   syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
-  $("settingsOverlay").classList.remove("hidden");
+  // R129：设置不再是弹层，而是「其他」Tab 的一页。原先那句「移除 settingsOverlay 的 hidden」
+  // 改为切到该 tab —— 表单字段的 id 一个都没变，故上面的回显逻辑完全复用。
+  showMainTab("other");
   // 三场景编辑区（SR-005b）：先渲染（立刻可见），再 await 取活值（推荐列表要用新数据，SD-7）。
-  // 顺序是「先可见后补齐」而不是反过来——费率接口慢时不该让整个设置弹层等它。
+  // 顺序是「先可见后补齐」而不是反过来——费率接口慢时不该让整页等它。
   await openSceneEditor();
 }
 
 function closeSettings() {
-  closeTimeEditor(); // 弹层关掉时不留半开的时间选择器
-  $("settingsOverlay").classList.add("hidden");
+  closeTimeEditor(); // 关页时不留半开的时间选择器
   closeModelSearch();
 }
 
@@ -4621,7 +4573,8 @@ function bind() {
 
   // 统一设置弹层
   $("btnSettingsSave").onclick = saveSettings;
-  $("btnSettingsCancel").onclick = closeSettings;
+  // btnSettingsCancel 已随设置弹层删除（设置现在是「其他」页，无「取消」概念：
+  // 各字段本来就是「改完点保存」或「即时生效」两种，不存在整页回滚）。
   // 三场景路由（SR-005b）：复制当前配置 / 预检（dry_run，不写盘）/ 保存（存前静默复制旧值）
   $("btnSceneCopy").onclick = () => copyText(sceneConfigText(), "当前三场景配置");
   $("btnSceneDryRun").onclick = sceneDryRun;
@@ -4974,8 +4927,6 @@ function bind() {
   // 眼睛图标（R122）：编辑渠道时也能看明文，与复制链路同样「点一下才取那一条」。
   $("btnCeEye").onclick = () => toggleCeKeyEye();
 
-  // 点击弹层空白处关闭
-  $("settingsOverlay").onclick = (e) => { if (e.target === $("settingsOverlay")) closeSettings(); };
   $("renameOverlay").onclick = (e) => { if (e.target === $("renameOverlay")) closeRename(); };
   $("helpOverlay").onclick = (e) => { if (e.target === $("helpOverlay")) closeHelp(); };
 
@@ -5014,8 +4965,6 @@ try {
 function persistUsageDays() {
   try { localStorage.setItem(USAGE_DAYS_KEY, String(usageDays)); } catch (e) { /* 忽略 */ }
 }
-let usageChart = null;    // token 折线图（echarts 实例）
-let creditChart = null;   // 积分消耗折线图（echarts 实例）
 let recentAll = [];       // 全量最近流水（分页源，时间升序）
 let recentPage = 0;
 let lastNames = {};       // 最近一次渲染的 uid→昵称表（翻页时复用）
@@ -5111,8 +5060,8 @@ function renderUsage(st) {
 
   renderModelTable(st.token.by_model || [], usageDays);
   renderCreditTab(st.credit || {});
-  renderUsageChart(st);
-  renderCreditChart(st.credit || {});
+  renderUsageDonut(st);
+  renderCreditDonut((st.credit || {}).entries);
 }
 
 // syncUsageRangeActive 把「今日/7日」按钮高亮同步为当前 usageDays。
@@ -5140,12 +5089,12 @@ function renderModelTable(rows, days) {
 function renderCreditTab(credit) {
   const entries = credit.entries || [];
   const names = credit.name_map || {};
-  // 分页渲染流水（折线图由 renderCreditChart 基于同一份条目自算）
+  // 分页渲染流水（环形由 renderCreditDonut 基于同一份条目聚合）
   recentAll = entries;
   recentPage = 0;
   lastNames = names;
   renderRecentPage(names);
-  renderCreditChart(entries, names);
+  renderCreditDonut(entries);
 }
 
 function renderRecentPage(names) {
@@ -5170,188 +5119,315 @@ function renderRecentPage(names) {
   $("pgNext").disabled = recentPage >= pages - 1;
 }
 
-// makeChart 懒建 echarts 实例；CDN 不可达时在容器里显示提示并返回 null。
-function makeChart(box, existing) {
-  if (typeof echarts === "undefined") {
-    box.textContent = "图表库加载失败（CDN 不可达），表格不受影响";
-    return null;
-  }
-  return existing || echarts.init(box);
+// ---------- 用量模块：环形 + 占比清单（R129，2026-10-29）----------
+// 为什么不再用折线图（当日真实数据量化，不是口味问题）：
+//   ① 今日 24 个桶只有 8 个非空，其中 7 个是"尚未到来的时刻" ⇒ 横向 2/3 空白；
+//   ② 今日主力渠道 99.4%，另两条 0.6%/0.0% 贴 X 轴，肉眼不可见；
+//   ③ 7 日 16 条模型线，前 3 名占 98.3% ⇒ 读图不如读表。
+// 根因：折线表达"趋势"，而用户要问的是"谁在吃额度"（占比）。故改环形 + 占比清单。
+// 同时第三方图表库整体下线（本面板仅此两处图表），不再依赖外网 CDN。
+const TOP_SLICES = 5; // 前 5 名 + 「其他」= 6 档，正好用满明度梯
+
+// donutSVG 画环形。items 已按值降序；每段留 gap 度间隙便于分辨边界。
+function donutSVG(items, size, thick) {
+  const total = items.reduce((a, b) => a + b.v, 0) || 1;
+  const r = (size - thick) / 2, cx = size / 2, cy = size / 2, gap = 2.2;
+  let ang = -90;
+  const segs = items.map((it, i) => {
+    const sweep = (it.v / total) * 360;
+    const sw = Math.max(0, sweep - gap);
+    const a0 = ang, a1 = ang + sweep;
+    ang = a1;
+    const p = (a) => [cx + r * Math.cos((a * Math.PI) / 180), cy + r * Math.sin((a * Math.PI) / 180)];
+    const [x0, y0] = p(a0), [x1, y1] = p(a1);
+    const large = sw > 180 ? 1 : 0;
+    return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}"
+      fill="none" stroke="${rampColor(i)}" stroke-width="${thick}"/>`;
+  }).join("");
+  return `<svg class="donut" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--raised)" stroke-width="${thick}"/>${segs}</svg>`;
 }
 
-function renderUsageChart(st) {
-  const box = $("usageChart");
-  usageChart = makeChart(box, usageChart);
-  if (!usageChart) return;
-  const byDay = (st.token.by_day || []);
-  const dates = byDay.map((d) => d.date);
-  // 横轴就是后端下发的完整刻度序列（days=1 ⇒ 00:00~23:00，days=7 ⇒ 窗口内每天），
-  // 不在前端再算一遍：刻度口径只能有一个来源，否则「桶补到哪」又会两处打架（R98）。
-  // 渠道系列：取所有出现过的渠道并集，按区间总量降序（主力渠道排在图例最前）
-  const totalOf = {};
-  const chans = [...new Set(byDay.flatMap((d) => Object.keys(d.by_channel || {})))];
-  for (const d of byDay) for (const [ch, v] of Object.entries(d.by_channel || {})) totalOf[ch] = (totalOf[ch] || 0) + v;
-  chans.sort((a, b) => (totalOf[b] || 0) - (totalOf[a] || 0));
-  // 区间内总量为 0 的渠道不画（连图例都不出现）。
-  const active = chans.filter((ch) => (totalOf[ch] || 0) > 0);
-  // 0 值一律画成 null（断点），不画成 0：
-  //   · 画成 0 ⇒ 每个"该渠道没跑"的时刻都落一个 0 点，ECharts 用直线把它们串起来，
-  //     于是图上恒有一条贴 X 轴的长线（用户实测：底部总有一条线）。
-  //   · 画成 null ⇒ 该时刻不产生点，曲线只覆盖真正有量的时段（中间自然断开）。
-  // 语义上也更准确：0 在这里表示"没观测到用量"，不是"观测到用量为 0"。
-  const series = active.map((ch) => ({
-    name: chLabel(ch), type: "line", smooth: true,
-    itemStyle: { color: chColor(ch) }, lineStyle: { color: chColor(ch) },
-    connectNulls: false,
-    data: byDay.map((d) => { const v = d.by_channel[ch]; return v > 0 ? v : null; }),
-  }));
-  usageChart.setOption({
-    color: active.map((ch) => chColor(ch)),
-    tooltip: {
-      trigger: "axis",
-      // 全 0 的时刻点不弹悬浮（避免清晨无用量时一片 0 刷屏）；
-      // 有数据时也过滤掉 0 值系列，只看当下真正在跑的渠道；
-      // 并按该时刻用量从多到少排序（与图例「主力在前」同一口径，不再按系列声明序）。
-      formatter: (params) => {
-        const list = params.filter((p) => p.value > 0).sort((a, b) => b.value - a.value);
-        if (!list.length) return "";
-        const head = `<div style="font-weight:600;margin-bottom:4px">${esc(params[0].axisValue)}</div>`;
-        return head + list.map((p) =>
-          `<div>${p.marker}${esc(p.seriesName)}：${fmtTokensFull(p.value)}</div>`).join("");
-      },
-    },
-    legend: { type: "scroll", data: series.map((s) => s.name),
-      tooltip: { show: true } },
-    grid: { left: 8, right: 20, top: 36, bottom: 28, containLabel: true },
-    xAxis: { type: "category", data: dates },
-    yAxis: { type: "value", axisLabel: { formatter: (v) => fmtAxisTokens(v) } },
-    series,
-  }, true);
-  usageChart.resize();
+// aggSlices 把已排序的 [{name, v, meta}] 收敛成「前 TOP_SLICES + 其他」。
+// 「其他」的 v 是**剩余项之和**（不是逐个画），meta=null 表示聚合项。
+function aggSlices(sorted) {
+  const head = sorted.slice(0, TOP_SLICES);
+  if (sorted.length <= TOP_SLICES) return head;
+  const rest = sorted.slice(TOP_SLICES);
+  return head.concat([{
+    name: `其他 ${rest.length} 个`, v: rest.reduce((a, b) => a + b.v, 0), meta: null,
+  }]);
 }
 
-// renderCreditChart 积分消耗折线图：按日聚合各账号 spend（原始条目自算），
-// 只画消耗总量前 10 的账号；不含入项/过期。
-function renderCreditChart(entries, names) {
-  const box = $("creditChart");
-  const spends = entries.filter((e) => e.kind === "spend");
-  if (!spends.length) { box.style.display = "none"; if (creditChart) { creditChart.dispose(); creditChart = null; } return; }
-  box.style.display = "";
-  creditChart = makeChart(box, creditChart);
-  if (!creditChart) return;
-  // 按日（今日视图按小时）× 账号聚合
-  const dates = usageAxisKeys(usageDays); // 固定整窗刻度，不是「只有消耗的时段」
-  const keyOf = (ts) => (usageDays === 1 ? fmtHour(ts) : fmtDay(ts));
-  const byAcct = {}; // uid -> {date: spend}
-  const totals = {}; // uid -> 总消耗
-  for (const e of spends) {
-    const d = keyOf(e.ts);
-    if (!dates.includes(d)) continue; // 窗口外条目（不应出现）不建桶，也不进 top10 统计
-    (byAcct[e.uid] ||= {})[d] = (byAcct[e.uid][d] || 0) + -e.amount;
-    totals[e.uid] = (totals[e.uid] || 0) + -e.amount;
+// renderUsageDonut 用量环形（token 维度）。数据源 /api/usage 的 by_model。
+function renderUsageDonut(st) {
+  const box = $("usageDonut"), list = $("usageShare"), foot = $("usageFoot");
+  if (!box || !list) return;
+  const rows = (st.token.by_model || []).slice().sort((a, b) => (b.pt + b.ct) - (a.pt + a.ct));
+  const total = rows.reduce((a, r) => a + r.pt + r.ct, 0);
+  const slices = aggSlices(rows.map((r) => ({
+    name: `${r.channel}/${r.model}`, v: r.pt + r.ct, meta: r,
+  })));
+  box.innerHTML = donutSVG(slices, 196, 28);
+  const tv = $("udTotal"), tl = $("udLabel");
+  if (tv) tv.innerHTML = fmtTokensFull(total);
+  if (tl) tl.textContent = `${usageDays === 1 ? "今日" : usageDays + " 日"} Token 消耗`;
+  list.innerHTML = sliceRows(slices, total, "token");
+  if (foot) foot.textContent = "饼图与清单同源（/api/usage by_model）。「未上报」= 上游不提供该维度，不是 0%。";
+}
+
+// renderCreditDonut 积分维度复用同一结构，只换数据源（按渠道聚合 spend）。
+function renderCreditDonut(entries) {
+  const box = $("creditDonut"), list = $("creditShare"), foot = $("creditFoot");
+  if (!box || !list) return;
+  const byCh = {};
+  for (const e of entries || []) {
+    if (e.kind !== "spend") continue;
+    byCh[e.channel] = (byCh[e.channel] || 0) + -e.amount;
   }
-  // 消耗总量为 0 的账号不画（同 token 图口径）：只有退款的账号净消耗可能为 0，
-  // 画出来就是一条贴 0 轴的长线。
-  const top10 = Object.keys(totals).sort((a, b) => totals[b] - totals[a])
-    .filter((uid) => (totals[uid] || 0) > 0).slice(0, 10);
-  // 系列名带渠道前缀（跨渠道同名昵称可区分）：取该账号消耗条目中最多的渠道
-  const mainChOf = (uid) => {
-    const cnt = {};
-    for (const e of spends) if (e.uid === uid) cnt[e.channel] = (cnt[e.channel] || 0) + 1;
-    return Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0] || "";
+  const rows = Object.keys(byCh).map((ch) => ({ name: chLabel(ch), v: byCh[ch], meta: { ch } }))
+    .filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
+  const total = rows.reduce((a, r) => a + r.v, 0);
+  const slices = aggSlices(rows);
+  box.innerHTML = donutSVG(slices, 196, 28);
+  const tv = $("cdTotal"), tl = $("cdLabel");
+  if (tv) tv.textContent = fmtCredits(total);
+  if (tl) tl.textContent = `${usageDays === 1 ? "今日" : usageDays + " 日"}积分消耗`;
+  list.innerHTML = sliceRows(slices, total, "credit");
+  if (foot) foot.textContent = "积分口径来自 ledger 流水差分，与 /api/stats 的 token 口径并列（R43，不合并不互校）。";
+}
+
+// sliceRows 占比清单。token 维度带缓存命中（本模块最有行动价值的一列：
+// 实测「吃 64% token 的模型复用率只有 12%」直接解释额度掉得快）；积分维度带条目数。
+function sliceRows(slices, total, mode) {
+  const head = mode === "token"
+    ? `<div class="mv-row mv-head"><span class="mv-sw"></span><span class="mv-name">模型</span>
+        <span class="mv-bar"></span><span class="mv-pct">占比</span>
+        <span class="mv-a">缓存命中</span><span class="mv-b">Token</span><span class="mv-c">请求</span></div>`
+    : `<div class="mv-row mv-head"><span class="mv-sw"></span><span class="mv-name">渠道</span>
+        <span class="mv-bar"></span><span class="mv-pct">占比</span>
+        <span class="mv-a"></span><span class="mv-b">积分</span><span class="mv-c"></span></div>`;
+  const body = slices.map((s, i) => {
+    const pct = total ? (s.v / total) * 100 : 0;
+    let a = "", b = "", c = "", nm = s.name;
+    if (mode === "token") {
+      const r = s.meta;
+      if (r && r.cr_cov) a = `<b class="hit">${Math.round((r.cr / r.cr_cov) * 100)}%</b>`;
+      else a = `<span class="dim">${r ? "未上报" : "—"}</span>`;
+      b = fmtTokensFull(s.v);
+      c = r ? String(r.requests) : "—";
+    } else {
+      b = fmtCredits(s.v);
+      c = String((s.meta && s.meta.ch) || "");
+    }
+    return `<div class="mv-row"><span class="mv-sw" style="background:${rampColor(i)}"></span>
+      <span class="mv-name" title="${esc(nm)}">${esc(nm)}</span>
+      <span class="mv-bar"><i style="width:${Math.max(pct, 0.4).toFixed(1)}%;background:${rampColor(i)}"></i></span>
+      <span class="mv-pct">${pct.toFixed(1)}%</span>
+      <span class="mv-a">${a}</span><span class="mv-b">${b}</span><span class="mv-c">${c}</span></div>`;
+  }).join("");
+  return head + body;
+}
+
+// ---------- 首页仪表盘（R129）----------
+// 首页 = 指标卡 + 三场景摘要 + 用量环形 + 运行统计（原有 mtabStats 全部保留）。
+// 设计依据（TP-002 v3）：第一屏必须回答「现在落到谁、还剩多少、今天要做什么」。
+// 指标卡的数字全部来自既有 `/api/stats` 与 `/api/state` 字段，**不新增任何后端字段**；
+// 唯一缺的是「模型最近使用时刻」，那是 R130 的事（此处不显示相对时间，避免编造）。
+
+// renderHomeCards 顶部 6 张指标卡。全部实字段，缺数据时显示「—」而不是 0。
+function renderHomeCards() {
+  const box = $("homeCards");
+  if (!box || !state) return;
+  const accs = state.accounts || [];
+  const st = lastStats || {};
+  const tu = st.token_usage || {};
+  const signed = accs.filter((a) => a.last_checkin_ok).length;
+  const na = accs.filter((a) => a.credits_na).length;
+  const canSign = accs.length - na;
+  const cards = [
+    { l: "账号总数", v: String(accs.length),
+      s: `已签到 ${signed}/${canSign}${na ? ` · 不适用 ${na}` : ""}`,
+      cls: signed >= canSign ? "ok" : "warn" },
+    { l: "今日获得积分", v: st.credit_in != null ? `+${fmtCredits(st.credit_in)}` : "—", s: "签到与每日发放", cls: "ok" },
+    { l: "今日消耗积分", v: st.credit_used != null ? fmtCredits(st.credit_used) : "—",
+      s: st.reqs != null ? `${fmtCredits(tu.req_today || 0)} 次请求 · 作废 ${fmtCredits(st.credit_expired || 0)}` : "—", cls: "warn" },
+    { l: "总积分", v: st.total_credits != null ? fmtCredits(st.total_credits) : "—",
+      s: `${new Set(accs.map((a) => a.group)).size} 个渠道`, cls: "" },
+    { l: "即将过期", v: st.expiring_7d != null ? fmtCredits(st.expiring_7d) : "—",
+      s: `今日 ${fmtCredits(st.expire_today || 0)} · 明日 ${fmtCredits(st.expire_tomorrow || 0)}`,
+      cls: (st.expire_today || 0) > 0 ? "bad" : "" },
+    { l: "Token 消耗", v: tu.days7 != null ? fmtTokensFull(tu.days7) : "—",
+      s: tu.all != null ? `本周 · 累计 ${fmtTokensFull(tu.all)} / ${fmtCredits(tu.req_all || 0)} 次` : "—", cls: "" },
+  ];
+  box.innerHTML = cards.map((c) =>
+    `<div class="kcard"><div class="k-l">${esc(c.l)}</div>` +
+    `<div class="k-v ${c.cls}">${esc(c.v)}</div><div class="k-s">${esc(c.s)}</div></div>`).join("");
+}
+
+// renderHomeRecent 「最近在用」列表（R130，数据来自 /api/stats 的 recent_models）。
+//
+// 为什么需要它：用户的原话是「查看最近在用的模型」——旧面板只有「今日按模型消耗」
+// 排行，回答不了「我昨天那个活跑的是哪个模型」。该字段后端跨天保留，故今早还没
+// 跑任何请求时也能看到昨天最后在用的是什么。
+//
+// 口径注意：reqs/tokens 是**今日**的（跨天清零），LastTS 是**绝对时刻**（跨天保留）。
+// 两者口径不同，故今日没跑的模型必须显示「今日未用」而不是显示 0——那是两回事。
+function renderHomeRecent() {
+  const box = $("homeRecent");
+  const sec = $("homeRecentSec");
+  if (!box) return;
+  const rows = (lastStats && lastStats.recent_models) || [];
+  if (!rows.length) {
+    // 一条都没有 = 这个实例还没成功记账过任何请求。显示空态而不是隐藏整块，
+    // 否则用户会以为是面板坏了。
+    if (sec) sec.classList.remove("hidden");
+    box.innerHTML = '<div class="hint" style="padding:4px 2px">还没有成功记账的请求</div>';
+    return;
+  }
+  if (sec) sec.classList.remove("hidden");
+  box.innerHTML = rows.map((r) => {
+    const ch = r.model.split("/")[0];
+    const today = r.reqs ? `<span class="rm-tok">${fmtTokensFull(r.tokens || 0)}</span>
+        <span class="rm-req">${r.reqs} 次</span>`
+      : '<span class="rm-idle">今日未用</span>';
+    return `<div class="rm-row">
+      <span class="ch" style="--c:var(--ch)">${esc(chLabel(ch))}</span>
+      <code title="${esc(r.model)}">${esc(r.model.split("/").slice(1).join("/") || r.model)}</code>
+      ${today}
+      <span class="rm-ago" title="${esc(fmtClock(r.last_ts))}">${esc(relTime(r.last_ts))}</span>
+    </div>`;
+  }).join("");
+}
+
+// relTime unix 秒 → 相对时间。只用到「分钟级」，且过了 24h 就退回绝对日期——
+// 「37 小时前」不如「10-28」有用（人读相对时间只在当天有效）。
+function relTime(ts) {
+  if (!ts) return "—";
+  const sec = Math.floor(Date.now() / 1000) - ts;
+  if (sec < 0) return "刚刚";        // 时钟漂移不显示「-3 分钟前」
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return fmtClock(ts).split(" ")[0] || "—";
+}
+
+// fmtClock unix 秒 → "MM-DD HH:MM"（本地时区，用于悬浮提示与超过 24h 的回落显示）。
+function fmtClock(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// renderHomeScenes 三场景摘要（只读）。编辑在「模型管理」页，这里只回答「现在落到谁」。
+// 备胎链只列前 3 个（更多没有决策价值，看全链去模型管理页）。
+function renderHomeScenes() {
+  const box = $("homeScenes");
+  if (!box || !state) return;
+  // 用 data-goto + 容器上的 onclick 委托，而不是给按钮起 id：动态生成的节点若用 id，
+  // 「$() 悬空引用」扫描会把它当成指向不存在 DOM。onclick 赋值天然幂等（重复赋值只替换），
+  // 不必再维护「绑定过没」的标记（那还得碰 dataset，虚假 DOM 里不一定有）。
+  box.onclick = (e) => {
+    const b = e.target && e.target.closest && e.target.closest("[data-goto]");
+    if (b) showMainTab(b.dataset.goto);
   };
-  // 同渠道多个账号时做颜色变体，保证 10 条线互不相同
-  const colorByUid = {};
-  const vIdx = {};
-  for (const uid of top10) {
-    const ch = mainChOf(uid);
-    colorByUid[uid] = varyColor(chColor(ch), vIdx[ch] = (vIdx[ch] ?? -1) + 1);
+  const rules = sceneNormalize(state.compat, state.model_fallback);
+  const acc = state.accounts || [];
+  const byGroup = {};
+  for (const a of acc) (byGroup[a.group] = byGroup[a.group] || []).push(a);
+  const rows = SCENE_ALIASES.map(({ alias, label, desc }) => {
+    const r = rules[alias] || { from: "", to: [] };
+    const ch = (r.from || "").split("/")[0];
+    const pool = byGroup[ch] || [];
+    const usable = pool.filter((a) => !a.disabled && !a.cooling).length;
+    const tos = (r.to || []).slice(0, 3)
+      .map((t, i) => `<span class="hs-pill"><b>${i + 1}</b>${esc(t)}</span>`).join("");
+    const more = (r.to || []).length > 3 ? `<span class="hs-more">+${(r.to || []).length - 3}</span>` : "";
+    return `<div class="hs-card">
+      <div class="hs-head"><span class="hs-tag">${esc(alias)}</span><b>${esc(label)}</b>
+        <span class="hs-desc">${esc(desc)}</span></div>
+      <div class="hs-main"><code>${esc(r.from || "（未配置）")}</code>
+        <span class="hs-pool ${usable ? "ok" : "bad"}">可用 ${usable}/${pool.length}</span></div>
+      <div class="hs-chain"><span class="hs-lbl">备胎</span>${tos || '<span class="hint">（无）</span>'}${more}</div>
+    </div>`;
+  }).join("");
+  box.innerHTML = `<div class="sec-head"><h2>三场景落点</h2>
+    <span class="hint">面板配置别名背后的主模型与备胎顺序</span>
+    <button class="btn small" data-goto="models">去调整</button></div>
+    <div class="hs-grid">${rows}</div>`;
+}
+
+// 主面板 tab 切换（首页 / 账号管理 / 模型管理 / 其他）—— R129 四 Tab 重构
+// 结构变化要点：
+//   · 首页 = 指标卡 + 三场景摘要 + 用量（环形）+ 运行统计（含临期/接棒/日志）
+//   · 账号管理 = 原首页内容（不再有「全部签到」，签到入口统一收在首页）
+//   · 模型管理 = 三场景与降级链编辑器 + 模型路由/思考强度 + 费率清单
+//   · 其他 = 原设置弹层的 7 组（设置不再是独立页面/弹层，改成本页分组）
+// 为什么 settingsOverlay 被删：设置是常驻配置，用弹层会让「改一项要开一次弹窗再关」；
+// 弹层仍保留给「中断式任务」（添加账号、自定义渠道、模型导入、确认框）。
+const MAIN_TABS = ["home", "accounts", "models", "other"];
+function showMainTab(name) {
+  const t = MAIN_TABS.includes(name) ? name : "home";
+  document.querySelectorAll(".main-tabs .mtab").forEach((x) => {
+    x.classList.toggle("active", x.dataset.mtab === t);
+  });
+  const map = { home: "mtabHome", accounts: "mtabAccounts", models: "mtabModels", other: "mtabOther" };
+  for (const k of MAIN_TABS) {
+    const el = $(map[k]);
+    if (el) el.classList.toggle("hidden", k !== t);
   }
-  const series = top10.map((uid) => ({
-    name: `${chLabel(mainChOf(uid))} ${names[uid] || shortUid(uid)}`, type: "line", smooth: true,
-    itemStyle: { color: colorByUid[uid] }, lineStyle: { color: colorByUid[uid] },
-    connectNulls: false,
-    // 同 token 图：0 值画成 null（断点），避免"该账号当天没消耗"被画成贴 0 轴的长线。
-    data: dates.map((d) => { const v = byAcct[uid][d]; return v > 0 ? v : null; }),
-  }));
-  creditChart.setOption({
-    color: top10.map((uid) => colorByUid[uid]),
-    tooltip: {
-      trigger: "axis", valueFormatter: (v) => fmtCredits(v),
-      formatter: (params) => {
-        // 同 token 图：悬浮按该时刻消耗从多到少排序，最大的一条在最上面。
-        const list = params.filter((p) => p.value > 0).sort((a, b) => b.value - a.value);
-        if (!list.length) return "";
-        const head = `<div style="font-weight:600;margin-bottom:4px">${esc(params[0].axisValue)}</div>`;
-        return head + list.map((p) =>
-          `<div>${p.marker}${esc(p.seriesName)}：${fmtCredits(p.value)}</div>`).join("");
-      },
-    },
-    legend: { type: "scroll", data: series.map((s) => s.name),
-      tooltip: { show: true } },
-    grid: { left: 8, right: 20, top: 36, bottom: 28, containLabel: true },
-    xAxis: { type: "category", data: dates },
-    yAxis: { type: "value", axisLabel: { formatter: (v) => fmtCredits(v) } },
-    series,
-  }, true);
-  creditChart.resize();
-}
-
-// fmtDay 时间戳 → "09-21"（与 token 图 X 轴口径一致）
-function fmtDay(ts) {
-  const d = new Date(ts * 1000);
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-// fmtHour 时间戳 → "09:00"（今日视图的小时桶键，与后端 by_day 的 date 同形）
-function fmtHour(ts) {
-  const d = new Date(ts * 1000);
-  return `${String(d.getHours()).padStart(2, "0")}:00`;
-}
-
-// usageAxisKeys 固定横轴刻度（R98）：
-//   days=1 ⇒ 当天 00:00~23:00 共 24 个小时桶；days>1 ⇒ 窗口内每天（含今天）。
-// **刻度只跟区间有关，与「当前几点」无关**——后端 ledger.Query 已按同一口径补齐空桶，
-// 这里算一份是为了让积分图（自己按流水聚合，不走 by_day）跟 token 图刻度完全对齐。
-function usageAxisKeys(days) {
-  const now = new Date();
-  const out = [];
-  if (days === 1) {
-    for (let h = 0; h < 24; h++) out.push(`${String(h).padStart(2, "0")}:00`);
-    return out;
+  closeCreditDetail(); // 切 tab 强制收起积分明细浮窗，避免残留浮在其他页签上（R129）
+  if (t === "home") {
+    loadUsage();  // 用量/环形与指标卡同屏，进首页即刷新
+    loadStats();  // 运行统计（含临期、接棒、日志）
+    fitPlatCols();
   }
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-    out.push(`${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  if (t === "models") {
+    // 三场景/降级链编辑器现在挂在「模型管理」页（R129：从设置弹层搬出）。
+    // 推荐候选要用费率与额度，缺才拉；编辑器本身先渲染，不阻塞在接口上。
+    if (!lastFees) { loadFees().catch(() => {}); }
+    if (!lastStats) { loadStats().catch(() => {}); }
+    ensureSceneEditor();
   }
-  return out;
+  if (t === "other") syncOtherNav();
 }
 
-// 主面板 tab 切换（账号管理 / 用量与流水 / 运行统计 / 模型列表和费率）
+// ensureSceneEditor 门车型渲染：只有「还没渲染过」才灌数据。
+// 为什么不能无条件调 openSceneEditor()：它会把 edit 态重置成服务端值——用户正在改
+// 三场景时，任何一次统计刷新都会把编辑冲掉（与 SR-003 的 G1 同族坑）。
+// 但「首帧 state 还没到」时又必须补渲染，否则模型管理页永远空白。
+function ensureSceneEditor() {
+  if (!state) return;
+  const box = $("sceneCards");
+  if (!box) return;
+  if (box.innerHTML.trim()) return;   // 已有内容 = 渲染过（或正在编辑），不覆盖
+  openSceneEditor().catch(() => {});
+}
+
 function bindMainTabs() {
   document.querySelectorAll(".main-tabs .mtab").forEach((b) => {
-    b.onclick = () => {
-      document.querySelectorAll(".main-tabs .mtab").forEach((x) => x.classList.toggle("active", x === b));
-      $("mtabAccounts").classList.toggle("hidden", b.dataset.mtab !== "accounts");
-      $("mtabUsage").classList.toggle("hidden", b.dataset.mtab !== "usage");
-      $("mtabStats").classList.toggle("hidden", b.dataset.mtab !== "stats");
-      $("mtabFees").classList.toggle("hidden", b.dataset.mtab !== "fees");
-      // 切换主 tab 强制收起积分明细浮窗，避免残留浮在其他页签上
-      closeCreditDetail();
-      if (b.dataset.mtab === "usage") {
-        loadUsage(); // 切到用量 tab 时拉最新（首次渲染自动刷新）
-        if (usageChart) usageChart.resize();
-        if (creditChart) creditChart.resize();
-      }
-      if (b.dataset.mtab === "stats") {
-        loadStats(); // 切到运行统计 tab 时拉最新（后台 30s 轮询兜底）
-        fitPlatCols(); // 之前隐藏时跳过测量，切回时按当前字号重算列宽
-      }
-    };
+    b.onclick = () => showMainTab(b.dataset.mtab);
   });
 
   bindFeesTabs(); // 费率面板渠道标签切换（事件委托一次绑定）
   bindSummaryFilter(); // 积分汇总条 chip 点击筛选账号（事件委托一次绑定）
+}
+
+// syncOtherNav 「其他」页侧导航：点条目滚到对应 cfg-section 并高亮。
+// 分组标题即原设置的 cfg-heading，滚动目标就是各 section 自身（id 未变）。
+function syncOtherNav() {
+  const nav = $("otherNav");
+  if (!nav) return;
+  const links = [...nav.querySelectorAll("a")];
+  links.forEach((a) => {
+    a.onclick = () => {
+      const el = $(a.dataset.sec);
+      if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+      links.forEach((x) => x.classList.toggle("on", x === a));
+    };
+  });
+  if (!links.some((x) => x.classList.contains("on")) && links[0]) links[0].classList.add("on");
 }
 
 // 面板 tab / 范围切换事件（bind 末尾调用）
@@ -5371,13 +5447,10 @@ function bindUsage() {
       document.querySelectorAll(".tabs .tab").forEach((x) => x.classList.toggle("active", x === b));
       $("tabToken").classList.toggle("hidden", b.dataset.tab !== "token");
       $("tabCredit").classList.toggle("hidden", b.dataset.tab !== "credit");
-      if (b.dataset.tab === "token" && usageChart) usageChart.resize();
-      if (b.dataset.tab === "credit" && creditChart) creditChart.resize();
     };
   });
   $("pgPrev").onclick = () => { if (recentPage > 0) { recentPage--; renderRecentPage(lastNames); } };
   $("pgNext").onclick = () => { recentPage++; renderRecentPage(lastNames); };
-  window.addEventListener("resize", () => { if (usageChart) usageChart.resize(); if (creditChart) creditChart.resize(); });
 }
 
 // ---------- 运行统计面板（第三个主 tab；数据来自 internal/stats 引擎的 /api/stats） ----------
@@ -5499,6 +5572,14 @@ function renderStats(s) {
   renderModels(s.models || []);
   buildPerfLookup(s.models || []); // 用量 tab 的速度列数据源（同源同频刷新）
   handleToasts(s.toasts || []);
+  // R129：首页与统计同源——指标卡要 credit_in/used/total/expiring，三场景摘要要账号池状态。
+  // 放在这里而不是各拉一次接口，保证「首页数字」与「平台表」永远同一时刻的一致快照。
+  renderHomeCards();
+  renderHomeRecent();
+  renderHomeScenes();
+  // 模型管理页可能先于 state 到达就被打开过；这里补一次（门车型，已有内容不覆盖）
+  const mm = $("mtabModels");
+  if (mm && !mm.classList.contains("hidden")) ensureSceneEditor();
 }
 
 // 平台表（今日情况主视图）：列 = #/平台/账号/当前积分/今日收入/今日消耗(净值)/今日作废/

@@ -61,6 +61,22 @@ type ModelStat struct {
 	CRReqs int64 `json:"cr_reqs,omitempty"`
 }
 
+// ModelRecent 「最近在用」的一个模型（跨天保留，用于首页列表）。
+//
+// 与 ModelStat 的区别：ModelStat 是**今日**聚合（跨天清零），ModelRecent 只回答
+// 「我上一次跑它是什么时候」，跨天不清。两个字段口径不同，故各自独立下发，
+// 前端不要用 Recent 的顺序去解释 ModelStat 的数字。
+type ModelRecent struct {
+	Model  string `json:"model"`
+	LastTS int64  `json:"last_ts"`           // 最近一次成功记账的 unix 秒（绝对时刻，跨天保留）
+	Reqs   int64  `json:"reqs,omitempty"`    // 今日次数（今日没跑则为 0，不是「总数」）
+	Tokens int64  `json:"tokens,omitempty"`  // 今日 token（同上）
+}
+
+// recentModelsLimit 首页「最近在用」列表的条数上限。
+// 5 条：再多就该去模型管理页看，首页只承担「接着干昨天的活」这一个作用。
+const recentModelsLimit = 5
+
 // modelEntry per-model 今日累计（消耗 + 性能采样）。
 // 性能采样只统计「usage 记账成功」的请求（与表内「次数」列同口径，失败/截断请求
 // 不计，否则秒回错误会把首字节均值拉低成假象）：
@@ -138,7 +154,41 @@ func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64,
 		m.genTokens += completion
 		m.genSec += genSec
 	}
+	// 最近使用时刻：只在**记账成功**时更新（与 reqs/tokens 同口径）。
+	// 失败/被取消的请求不推进时间戳，否则「最近在用」会把一个实际没跑成的模型顶到前面。
+	s.touchModelUsedLocked(model, now)
 	s.dirty = true
+}
+
+// modelLastUsedCap modelLastUsed 的容量上限。
+// 为什么需要：模型名来自上游目录 + 自定义渠道，长期运行会积累（下架模型、改名的
+// 自定义渠道都会留下旧 key）。不设上限就是一条只增不减的内存+落盘泄漏。
+// 超限时**按时刻升序淘汰最旧的**，即保留「最近用过的那批」——正是这个字段的语义。
+const modelLastUsedCap = 200
+
+// touchModelUsedLocked 记录模型最近使用时刻（调用方须持锁）。
+func (s *Stats) touchModelUsedLocked(model string, now time.Time) {
+	if s.modelLastUsed == nil {
+		s.modelLastUsed = map[string]int64{}
+	}
+	s.modelLastUsed[model] = now.Unix()
+	if len(s.modelLastUsed) <= modelLastUsedCap {
+		return
+	}
+	// 超限：把最旧的一批删掉。一次多删 10%，避免每加一条就全表扫描排序。
+	type kv struct {
+		k string
+		v int64
+	}
+	all := make([]kv, 0, len(s.modelLastUsed))
+	for k, v := range s.modelLastUsed {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].v < all[j].v })
+	drop := len(all) - modelLastUsedCap + modelLastUsedCap/10
+	for i := 0; i < drop && i < len(all); i++ {
+		delete(s.modelLastUsed, all[i].k)
+	}
 }
 
 // AddRequestRow 追加请求级日志行（内存环形，不持久化、不置 dirty）。
