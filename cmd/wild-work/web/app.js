@@ -2913,6 +2913,141 @@ function sceneSummary(r) {
   return `${(r && r.from) || "（未设置）"} → ${to.length ? to.join(" → ") : "（无备胎）"}`;
 }
 
+// ---------- 三场景推荐候选列表（SR-005c） ----------
+// 定位：**帮用户挑，不替用户选**（文案必须写明「仅供参考」，R-4）。
+// 排序真相源是 rankCandidates（SR-005a 纯函数），这里只做呈现，绝不另算一遍口径。
+//
+// 三条硬约束（改代码前先读）：
+//   ① 证据等级（report_evidence）只做**徽标**，严禁进排序（SD-2）。故本区块**只读**
+//      SCENE_CANDIDATES 的 evidence，不改 rankCandidates 的输出顺序——顺序由它自己决定。
+//   ② 每次展开都重算重排（SD-7）。数据取自 lastFees / lastStats（openSceneEditor 已 await 取过）。
+//   ③ `cached_at` 陈旧度必须显式（R-3b 的镜像面）：拿旧费率算出来的"推荐"必须让用户看得见它旧。
+const SCENE_REC_STALE_MIN = 30; // ≥30 分钟就高亮提示；与 /api/fees 的后台刷新间隔（30min）同量级
+
+// 推荐列表的展开态与当前 tab（模块级，只在设置弹层存活期间有效）
+let sceneRecOpen = false;
+let sceneRecTab = "fast";
+
+// sceneCandOverride 只为一件事存在：让 ui-static-check 能注入"另一份证据等级数据"来断言
+// 「改证据等级不改变排序」。生产路径永远为 null ⇒ 读常量。不设 setter 以外的入口，
+// 避免变成"运行期可换候选池"的隐性口子（候选池的来源只能是 SR-002 数据文件）。
+let sceneCandOverride = null;
+
+// sceneCandData 读当前生效的候选池数据（生产 = SCENE_CANDIDATES 常量）。
+function sceneCandData() { return sceneCandOverride || SCENE_CANDIDATES; }
+
+// sceneEvidenceOf 取某模型在某场景的证据等级快照（只读，绝不参与排序）。
+// 返回 null 表示该模型不在 SR-002 候选池里（例如用户从搜索框临时挑的）。
+function sceneEvidenceOf(alias, id) {
+  const sc = (sceneCandData().scenes || []).find((x) => x.alias === alias);
+  const hit = ((sc && sc.candidates) || []).find((c) => c.id === id);
+  return hit ? (hit.report_evidence || null) : null;
+}
+
+// sceneFeeAgeMinutes 解析 /api/fees 的 cached_at（形如 `10-29 12:10`，无年份）为「多少分钟前」。
+// 返回 null = 解析不了（旧后端/格式变了），此时不显示年龄而不是显示 0（0 会被误读成"刚刚刷新"）。
+// ⚠️ 跨年陷阱：该格式不带年份。今天 01-01 而 cached_at 写 `12-31 23:59` ⇒ 那是**去年**的，
+//    按今年解析会得到一个"未来时刻"、减出负数。判据是：解析结果超过「未来容忍窗」即说明
+//    这条快照属于上一年 ⇒ **减一年**（不是加一年；加了会把去年说成明年，年龄仍然错）。
+//    容忍窗取 10 分钟：费率刷新就有分钟级抖动，不能把"时钟略慢"误判成跨年。
+const SCENE_AGE_FUTURE_TOLERANCE_MS = 10 * 60 * 1000;
+function sceneFeeAgeMinutes(cachedAt) {
+  const m = /^(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/.exec(String(cachedAt || "").trim());
+  if (!m) return null;
+  const now = new Date();
+  const build = (y) => new Date(y, +m[1] - 1, +m[2], +m[3], +m[4], 0, 0);
+  let t = build(now.getFullYear());
+  if (t.getTime() - now.getTime() > SCENE_AGE_FUTURE_TOLERANCE_MS) t = build(now.getFullYear() - 1);
+  const mins = Math.floor((now.getTime() - t.getTime()) / 60000);
+  return mins >= 0 ? mins : 0; // 极端时钟漂移下兜到 0，绝不返回负数让 UI 显示 "-617004 分钟"
+}
+
+// sceneAgeLabel 陈旧度文案。分档只为可读，判据只有一条：距上次拉取多久。
+function sceneAgeLabel(minutes) {
+  if (minutes === null) return "";
+  if (minutes < 0) return "";
+  if (minutes < 1) return "刚刚刷新";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const h = Math.floor(minutes / 60), r = minutes % 60;
+  return `${h} 小时${r ? r + " 分" : ""}前`;
+}
+
+// sceneStateBadge 四态的展示文案（与 rankCandidates 的 state 字段一一对应）。
+// ⚠️ UNPRICED 必须说清「消耗未知」而不是「免费」——这是 SR-002 §5.1.1 与 SR-008 §2.1 的底线。
+const SCENE_STATE_META = {
+  PRICED:    { label: "已定价", cls: "ok",   tip: "上游已下发倍率，消耗速率已知" },
+  FREE:      { label: "免费",   cls: "free", tip: "零消耗，不占用期额度" },
+  UNPRICED:  { label: "消耗未知", cls: "unk", tip: "上游未下发倍率（priced=false 且 free=false）——不是免费，实际花多少分无法核实" },
+  UNAVAILABLE: { label: "已摘除路由", cls: "off", tip: "该模型所在渠道已被摘出全部路由" },
+};
+
+// renderSceneRec 渲染推荐候选列表（每次调用都重算重排，SD-7）。
+// 只在展开时计算：收起状态下不算 = 不浪费 CPU，也不会让"没展开却显示旧结果"发生。
+function renderSceneRec() {
+  const box = $("sceneRecBody");
+  if (!box) return;
+  const panel = $("sceneRecPanel");
+  if (panel) panel.classList.toggle("hidden", !sceneRecOpen);
+  if (!sceneRecOpen) { box.innerHTML = ""; return; }
+
+  // tab 高亮
+  const tabs = $("sceneRecTabs");
+  if (tabs) {
+    tabs.innerHTML = SCENE_ALIASES.map(({ alias, label }) =>
+      `<button class="btn small${alias === sceneRecTab ? " primary" : ""}" data-rec-tab="${alias}">${esc(label)}</button>`
+    ).join("");
+  }
+
+  const age = sceneFeeAgeMinutes((lastFees && lastFees.cached_at) || "");
+  const stale = age !== null && age >= SCENE_REC_STALE_MIN;
+  const list = rankCandidates(lastFees, lastStats, sceneRecTab, sceneCandData());
+
+  const head = `<div class="rec-head">
+      <span class="hint" style="margin:0">费率数据 <b>${esc((lastFees && lastFees.cached_at) || "未加载")}</b>
+      ${age !== null ? `（${esc(sceneAgeLabel(age))}${stale ? "，已超过 " + SCENE_REC_STALE_MIN + " 分钟，建议点上方「刷新费率」" : ""}）` : ""}</span>
+      <span class="hint" style="margin:0">共 ${list.length} 个候选 · 推荐仅供参考，可自由选择任意模型</span>
+    </div>`;
+
+  const rows = list.map((r, rank) => {
+    const ev = sceneEvidenceOf(sceneRecTab, r.id);
+    const st = SCENE_STATE_META[r.state] || SCENE_STATE_META.UNPRICED;
+    const rate = r.free ? "Free" : (r.priced ? `x${(+r.rate || 0).toFixed(2)}` : "未知");
+    const ctx = r.ctx ? formatTokenCount(r.ctx) : "—";
+    const caps = [
+      r.tools === true ? "工具" : "",
+      r.reasoning === true ? "推理" : "",
+    ].filter(Boolean).join("·") || "—";
+    const evBadges = ev ? Object.entries(ev).filter(([, v]) => v === "local-measured")
+      .map(([k]) => `<span class="rec-ev" title="该维度为本机实测">${esc(k)}实测</span>`).join("") : "";
+    const missTip = r.missing && r.missing.length ? `数据缺口：${r.missing.join("、")}` : "";
+    return `<div class="rec-row" data-rec-id="${esc(r.id)}">
+      <span class="rec-rank">${rank + 1}</span>
+      ${chBadge(r.channel)}
+      <span class="rec-id" title="${esc(r.id)}">${esc(r.id)}</span>
+      <span class="rec-state ${st.cls}" title="${esc(st.tip)}">${esc(st.label)}</span>
+      <span class="rec-num" title="当前倍率（上游按时段可能切换档位）">${esc(rate)}</span>
+      <span class="rec-num" title="上下文窗口">${esc(ctx)}</span>
+      <span class="rec-num" title="已声明的能力">${esc(caps)}</span>
+      <span class="rec-acts">
+        <button class="btn small" data-rec-set="${esc(r.id)}" title="把这个模型设为「${esc(SCENE_ALIASES.find((x) => x.alias === sceneRecTab).label)}」的主模型">设为主模型</button>
+        <button class="btn small" data-rec-add="${esc(r.id)}" title="追加到该场景备胎链末位">加为备胎</button>
+      </span>
+      ${evBadges ? `<span class="rec-evbox" title="证据等级（SD-2：只做标注，不参与排序）">${evBadges}</span>` : `<span class="rec-evbox" title="${esc(missTip || "无本机实测证据")}"><span class="rec-ev none">未实测</span></span>`}
+    </div>`;
+  }).join("");
+
+  box.innerHTML = head + (rows || `<div class="fb-empty">该场景暂无候选（SR-002 候选池里没有可用模型）</div>`);
+}
+
+// toggleSceneRec 展开/收起推荐列表。展开时强制重算（SD-7：每次打开都重算重排）。
+function toggleSceneRec() {
+  sceneRecOpen = !sceneRecOpen;
+  if (sceneRecOpen) sceneRecTab = sceneRecTab || "fast";
+  renderSceneRec();
+  const btn = $("btnSceneRec");
+  if (btn) btn.textContent = sceneRecOpen ? "收起推荐候选" : "展开推荐候选";
+}
+
 // renderSceneCards 渲染三张场景卡片。
 // 交互走事件委托（#sceneCards 上），因此每轮 innerHTML 重建无需重挂监听。
 // 行为：主模型行 = 可搜索单选 input（attachModelPicker）+ 备胎 chips（上移/下移/移除）+ 追加行。
@@ -3117,6 +3252,12 @@ function verifySceneReadback(res) {
 async function openSceneEditor() {
   sceneRules = sceneNormalize(state && state.compat, state && state.model_fallback);
   renderSceneCards();
+  // 推荐列表默认收起：不看就不算（SD-7 只承诺"每次展开重算"，不承诺"一直开着"）
+  sceneRecOpen = false;
+  sceneRecTab = "fast";
+  const recBtn = $("btnSceneRec");
+  if (recBtn) recBtn.textContent = "展开推荐候选";
+  renderSceneRec();
   $("sceneErr").textContent = "";
   // 费率与统计：只有缺的时候才拉（已有则不重复打接口）；下载失败不阻塞编辑区。
   if (!lastFees) { try { await loadFees(); } catch (e) { /* 不阻塞 */ } }
@@ -4443,6 +4584,27 @@ function bind() {
     if (down) { const [a, j] = down.dataset.sceneDown.split(":"); sceneMoveTo(a, +j, 1); return; }
     const del = e.target.closest("[data-scene-del]");
     if (del) { const [a, j] = del.dataset.sceneDel.split(":"); sceneDelTo(a, +j); return; }
+  });
+  // 推荐候选列表（SR-005c）：展开/收起 + 切场景 tab + 行内的「设为主模型 / 加为备胎」。
+  // 行内动作全部**只改编辑态**（sceneRules），落盘仍要用户点「保存三场景」——
+  // 推荐列表不是第二个写入口（SD-6 只有一条）。
+  $("btnSceneRec").onclick = toggleSceneRec;
+  $("sceneRecTabs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rec-tab]");
+    if (!b) return;
+    // 切 tab 也重算（SD-7：不是只换显示，而是按该场景重新排序）
+    sceneRecTab = b.dataset.recTab;
+    renderSceneRec();
+  });
+  $("sceneRecBody").addEventListener("click", (e) => {
+    const set = e.target.closest("[data-rec-set]");
+    if (set) {
+      sceneSetFrom(sceneRecTab, set.dataset.recSet);
+      renderSceneRec(); // 主模型变了 ⇒ 该场景的排序与互备提示都要跟着变
+      return;
+    }
+    const add = e.target.closest("[data-rec-add]");
+    if (add) { sceneAddTo(sceneRecTab, add.dataset.recAdd); renderSceneRec(); return; }
   });
   $("btnCompatMap").onclick = toggleMapEditor;
   $("selHost").onchange = () => {

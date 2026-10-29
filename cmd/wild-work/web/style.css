@@ -1678,6 +1678,55 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .scene-card[data-invalid="1"] { border-color: var(--danger); }
 .scene-sum { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; word-break: break-all; }
 
+/* 推荐候选列表（SR-005c）：一块可展开的面板，行内展示排序/状态/倍率/上下文/能力/动作。
+   设计约束：全部复用既有 CSS 变量，不引入新色彩 token（R99 的渠道色单一来源不动摇）。
+   状态色只用 --ok / --primary / --muted / --danger 四档，不新造色。 */
+.scene-rec {
+  margin-top: 8px; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.scene-rec.hidden { display: none; }
+.rec-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.rec-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 6px; }
+.rec-head .hint { font-size: 11.5px; }
+.rec-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 6px; border-radius: 6px; border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.rec-row:last-child { border-bottom: none; }
+.rec-row:hover { background: var(--card); }
+.rec-rank {
+  flex: none; min-width: 22px; text-align: right; color: var(--muted);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.rec-id {
+  flex: 1 1 260px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+}
+.rec-state {
+  flex: none; border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap;
+  background: var(--card); border: 1px solid var(--border); color: var(--muted);
+}
+.rec-state.ok   { color: var(--primary); border-color: var(--primary); }
+.rec-state.free { color: var(--ok); border-color: var(--ok); }
+.rec-state.unk  { color: var(--warn); border-color: var(--warn); }
+.rec-state.off  { color: var(--danger); border-color: var(--danger); }
+.rec-num {
+  flex: none; font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--muted); min-width: 42px;
+}
+.rec-acts { flex: none; display: flex; gap: 4px; margin-left: auto; }
+.rec-evbox { flex: none; display: flex; gap: 4px; flex-wrap: wrap; }
+.rec-ev {
+  font-size: 10.5px; border-radius: 999px; padding: 1px 6px;
+  background: #dbeafe; color: var(--primary); white-space: nowrap;
+}
+.rec-ev.none { background: var(--card); color: var(--muted); }
+@media (max-width: 900px) {
+  .rec-id { flex: 1 1 100%; }
+  .rec-acts { margin-left: 0; }
+}
+
 /* 思考强度映射卡片：档位 + 删除左对齐（不推最右） */
 .fb-map-card .fb-map-model {
   flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

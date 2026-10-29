@@ -494,6 +494,15 @@
         </div>
         <div class="hint" id="sceneWarn" style="color:var(--warn);margin-top:6px"></div>
         <div class="hint" id="sceneErr" style="color:var(--danger)"></div>
+
+        <!-- 推荐候选列表（SR-005c）：帮用户挑，不替用户选；每次展开都重算重排（SD-7） -->
+        <div class="row fb-foot-actions" style="margin-top:10px">
+          <button class="btn small" id="btnSceneRec" title="按当前费率与实测数据重算排序，给出候选参考（仅供参考，可自由选择任意模型）">展开推荐候选</button>
+        </div>
+        <div id="sceneRecPanel" class="scene-rec hidden">
+          <div id="sceneRecTabs" class="rec-tabs"></div>
+          <div id="sceneRecBody"></div>
+        </div>
       </div>
 
       <!-- 模型降级链 -->

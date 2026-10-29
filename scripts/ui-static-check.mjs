@@ -223,6 +223,15 @@ const patched =
   + ', sceneMoveTo: typeof sceneMoveTo === "function" ? sceneMoveTo : () => {}'
   + ', sceneDelTo: typeof sceneDelTo === "function" ? sceneDelTo : () => {}'
   + ', verifySceneReadback: typeof verifySceneReadback === "function" ? verifySceneReadback : () => ""'
+  // 推荐候选列表（SR-005c）：lastFees / lastStats / sceneRecOpen / sceneRecTab / SCENE_CANDIDATES
+  // 都是模块级可变绑定，只能用源码作用域注入器改。typeof 兜底同前。
+  + ", __setFees: (f) => { lastFees = f; }, __setStats: (s) => { lastStats = s; }"
+  + ", __setCandidates: (c) => { sceneCandOverride = c; }"
+  + ", __setSceneRecState: (open, tab) => { sceneRecOpen = !!open; sceneRecTab = tab; }"
+  + ', SCENE_STATE_META: typeof SCENE_STATE_META === "object" ? SCENE_STATE_META : null'
+  + ', renderSceneRec: typeof renderSceneRec === "function" ? renderSceneRec : () => {}'
+  + ', sceneFeeAgeMinutes: typeof sceneFeeAgeMinutes === "function" ? sceneFeeAgeMinutes : () => null'
+  + ', sceneAgeLabel: typeof sceneAgeLabel === "function" ? sceneAgeLabel : () => ""'
   + " };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
@@ -1031,6 +1040,178 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     && !saveFn.includes('/api/config/model_fallback'));
   check("SR-005b：style.css 有 .scene-card / .scene-lbl / a.is-off 样式",
     cssSrc.includes(".scene-card") && cssSrc.includes(".scene-lbl") && /a\.is-off/.test(cssSrc));
+}
+
+// ---- 场景 8：三场景推荐候选列表（SR-005c）----
+// 验收要点（SR-005 卡）：推荐行字段齐全、证据等级只标注不排序、数据年龄提示、
+// `cached_at` 解析、行内动作只改编辑态（不是第二个写入口）、每次展开都重算。
+{
+  const fees = {
+    cached_at: "10-29 12:10",
+    channels: [
+      { channel: "traework", models: [
+        { model: "deepseek-v4.1-flash", id: "traework/deepseek-v4.1-flash", priced: true, free: false, rate: 0.06, context_window: 200000, supports_tools: true, supports_reasoning: true } ] },
+      { channel: "raccoon", models: [
+        { model: "sn-deepseek-v4-1-flash-1017", id: "raccoon/sn-deepseek-v4-1-flash-1017", priced: true, free: false, rate: 0.25, context_window: 1000000, supports_tools: true, supports_reasoning: true } ] },
+      { channel: "kilo", models: [
+        { model: "nvidia/nemotron-3-ultra-550b-a55b:free", id: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free", priced: true, free: true, rate: 0, context_window: 1000000, supports_tools: true, supports_reasoning: true } ] },
+    ],
+  };
+  const stats = {
+    models: [
+      { model: "traework/deepseek-v4.1-flash", avg_ttfb_ms: 17039, avg_tok_per_sec: 100.8, perf_samples: 191 },
+      { model: "raccoon/sn-deepseek-v4-1-flash-1017", avg_ttfb_ms: 21065, avg_tok_per_sec: 153.3, perf_samples: 430 },
+    ],
+    platforms: [
+      { group: "traework", credits: 4187, expire_7d: 0 },
+      { group: "raccoon", credits: 10800, expire_7d: 300 },
+      { group: "kilo", credits: 0, expire_7d: 0 },
+    ],
+  };
+  T.__setFees(fees);
+  T.__setStats(stats);
+  T.__setSceneRules(T.sceneNormalize(
+    { model_map: { fast: "qwenwork/flash", code: "traework/deepseek-v4.1-flash", complex: "raccoon/sn-deepseek-v4-1-flash-1017" } }, []));
+
+  // ① 收起态：不渲染、不计算（"没展开却显示旧结果"不可能发生）
+  T.__setSceneRecState(false, "code");
+  T.renderSceneRec();
+  const collapsed = document.getElementById("sceneRecBody").innerHTML;
+  check("SR-005c：收起时不渲染任何行（不浪费计算，也不会显示旧结果）", collapsed === "", collapsed.slice(0, 80));
+  check("SR-005c：收起时面板带 hidden 类", document.getElementById("sceneRecPanel").classList.contains("hidden"));
+
+  // ② 展开态：按 tab 场景渲染，行数 = rankCandidates 的长度（不是候选池原长）
+  T.__setSceneRecState(true, "code");
+  T.renderSceneRec();
+  const body = document.getElementById("sceneRecBody").innerHTML;
+  const expect = T.rankCandidates(fees, stats, "code", T.SCENE_CANDIDATES).length;
+  check("SR-005c：展开后行数 = rankCandidates 结果长度（口径单一来源）",
+    (body.match(/class="rec-row"/g) || []).length === expect,
+    `渲染 ${(body.match(/class="rec-row"/g) || []).length} / 期望 ${expect}`);
+  check("SR-005c：展开时面板无 hidden 类", !document.getElementById("sceneRecPanel").classList.contains("hidden"));
+  check("SR-005c：三个场景 tab 齐备",
+    ["fast", "code", "complex"].every((a) => document.getElementById("sceneRecTabs").innerHTML.includes(`data-rec-tab="${a}"`)));
+  check("SR-005c：当前 tab 高亮（primary）",
+    new RegExp(`primary" data-rec-tab="${"code"}"`).test(document.getElementById("sceneRecTabs").innerHTML));
+
+  // ③ 行内字段齐全（卡上验收项）：序号/渠道徽标/模型ID/状态/倍率/上下文/能力/动作/证据
+  check("SR-005c：行含排序序号 rec-rank", /class="rec-rank"/.test(body));
+  check("SR-005c：行含渠道徽标（走 chBadge 单一来源）", /class="badge /.test(body));
+  check("SR-005c：行含模型 ID 且等宽字体", /class="rec-id"/.test(body));
+  check("SR-005c：行含四态徽标 rec-state", /class="rec-state /.test(body));
+  check("SR-005c：行含倍率与上下文两列", (body.match(/class="rec-num"/g) || []).length >= 2);
+  check("SR-005c：行含两个行内动作（设为主模型 / 加为备胎）",
+    /data-rec-set="/.test(body) && /data-rec-add="/.test(body));
+  check("SR-005c：行含证据等级区块", /class="rec-evbox"/.test(body));
+
+  // ④ 证据等级只标注、不排序（SD-2 的核心）——把 evidence 全改成 unverified 后顺序必须不变
+  const order1 = (T.rankCandidates(fees, stats, "code", T.SCENE_CANDIDATES) || []).map((x) => x.id).join(",");
+  // ⚠️ 判据必须用「**删掉**证据字段」而不是「全改成同一个值」：后者在"证据进排序"的变异下
+  //    会让主键全部相等、恰好退回原序，于是断言假绿（本条首跑 0 红正是这个原因）。
+  const cands2 = JSON.parse(JSON.stringify(T.SCENE_CANDIDATES));
+  cands2.scenes.forEach((s) => s.candidates.forEach((c) => { delete c.report_evidence; }));
+  const order2 = (T.rankCandidates(fees, stats, "code", cands2) || []).map((x) => x.id).join(",");
+  check("SR-005c：删掉证据等级后排序完全不变（SD-2：证据不得进排序）", order1 === order2, `有证据 ${order1.slice(0, 50)} / 无证据 ${order2.slice(0, 50)}`);
+  // 再加一条静态面：排序代码段里根本不该出现 evidence 字样（比数值断言更难糊弄）
+  {
+    const sortSec = raw.split("const STATE_RANK")[1].split("return out;")[0] || "";
+    check("SR-005c：排序代码段不含 evidence / report_evidence（静态锁死）",
+      !/evidence/i.test(sortSec), sortSec.slice(0, 120));
+  }
+  // 渲染也只读证据：改 data 后重渲染，顺序仍与第一次一致
+  T.__setCandidates(cands2);
+  T.renderSceneRec();
+  const body2 = document.getElementById("sceneRecBody").innerHTML;
+  check("SR-005c：改证据等级后重渲染，模型出现顺序不变",
+    (() => {
+      const ids1 = [...body.matchAll(/data-rec-set="([^"]+)"/g)].map((m) => m[1]);
+      const ids2 = [...body2.matchAll(/data-rec-set="([^"]+)"/g)].map((m) => m[1]);
+      return ids1.join(",") === ids2.join(",");
+    })());
+  T.__setCandidates(T.SCENE_CANDIDATES);
+  T.renderSceneRec();
+
+  // ⑤ UNPRICED 的文案必须是「消耗未知」而不是「免费」（SR-002 §5.1.1 底线）
+  check("SR-005c：四态文案映射齐备（PRICED/FREE/UNPRICED/UNAVAILABLE）",
+    ["PRICED", "FREE", "UNPRICED", "UNAVAILABLE"].every((k) => T.SCENE_STATE_META[k]));
+  check("SR-005c：UNPRICED 文案是「消耗未知」且提示明说不是免费",
+    T.SCENE_STATE_META.UNPRICED.label.includes("未知") && T.SCENE_STATE_META.UNPRICED.tip.includes("不是免费"),
+    T.SCENE_STATE_META.UNPRICED.tip);
+
+  // ⑥ 数据年龄（R-3b 的镜像面）：cached_at 解析 + 陈旧高亮
+  check("SR-005c：cached_at 可解析为分钟数", T.sceneFeeAgeMinutes("10-29 12:10") !== null);
+  check("SR-005c：解析不了时返回 null（不伪装成 0 分钟）",
+    T.sceneFeeAgeMinutes("not-a-date") === null && T.sceneFeeAgeMinutes("") === null);
+  check("SR-005c：年龄文案分档（<1 分 / 分钟 / 小时）",
+    T.sceneAgeLabel(0) === "刚刚刷新" && T.sceneAgeLabel(45).includes("45 分钟")
+    && T.sceneAgeLabel(150).includes("2 小时"));
+  check("SR-005c：跨年不出现负分钟（去年 12-31 在今年 1-1 时为正数）",
+    (() => {
+      // 造一个"未来"的 cached_at（同一分钟内不可能），验证被当成跨年而不是负数
+      const fut = T.sceneFeeAgeMinutes("12-31 23:59");
+      return fut === null || fut >= 0;
+    })(),
+    String(T.sceneFeeAgeMinutes("12-31 23:59")));
+  // 陈旧阈值：把 cached_at 改成很早，渲染必须出现「超过 NN 分钟」提示
+  T.__setFees(Object.assign({}, fees, { cached_at: "01-01 00:00" }));
+  T.renderSceneRec();
+  const staleHtml = document.getElementById("sceneRecBody").innerHTML;
+  check("SR-005c：费率超过阈值时显式提示「已超过 N 分钟，建议刷新」",
+    /已超过/.test(staleHtml) && /刷新费率/.test(staleHtml), staleHtml.slice(0, 120));
+  T.__setFees(fees);
+
+  // ⑦ 行内动作只改编辑态，绝不自己发写请求（SD-6 只有一条写入口）
+  T.__setSceneRecState(true, "fast");
+  T.renderSceneRec();
+  const beforeRules = JSON.stringify(T.__getSceneRules());
+  T.sceneSetFrom("fast", "traework/deepseek-v4.1-flash");
+  check("SR-005c：「设为主模型」只改 sceneRules（编辑态）",
+    T.__getSceneRules().fast.from === "traework/deepseek-v4.1-flash",
+    T.__getSceneRules().fast.from);
+  check("SR-005c：点行内动作后没有自动落盘（sceneRules 仍需用户点保存）",
+    JSON.stringify(T.__getSceneRules()) !== beforeRules);
+
+  // ⑧ 文案必须写明「仅供参考」（R-4：不能让人误以为必须用推荐）
+  T.renderSceneRec();
+  const finalHtml = document.getElementById("sceneRecBody").innerHTML;
+  check("SR-005c：头部文案含「仅供参考」「可自由选择任意模型」",
+    finalHtml.includes("仅供参考") && finalHtml.includes("可自由选择"));
+  check("SR-005c：头部显示候选总数", /共 \d+ 个候选/.test(finalHtml));
+  check("SR-005c：头部显示费率快照时刻（cached_at 原文）", finalHtml.includes("10-29 12:10"));
+
+  // ⑨ 接线静态面
+  const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const cssSrc = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  check("SR-005c：index.html 有推荐列表三件（按钮/面板/容器）",
+    ["btnSceneRec", "sceneRecPanel", "sceneRecBody"].every((x) => htmlSrc.includes(`id="${x}"`)));
+  check("SR-005c：app.js 里展开按钮与两个 tab/行内动作都已接线",
+    raw.includes('$("btnSceneRec").onclick') && raw.includes('$("sceneRecTabs").addEventListener')
+    && raw.includes('$("sceneRecBody").addEventListener'));
+  // 切 tab 必须**重算**而不是只换高亮（SD-7：每次打开/每次换场景都要重排）。
+  // 判据看回调体里有没有 renderSceneRec —— 动态面测不到（ui-static-check 不跑点击）。
+  check("SR-005c：切 tab 的回调里真的重算（不重算就只是换了个高亮）",
+    (() => {
+      const tabCb = raw.split('$("sceneRecTabs").addEventListener("click"')[1].split("});")[0] || "";
+      return tabCb.includes("renderSceneRec()");
+    })());
+  check("SR-005c：行内「设为主模型 / 加为备胎」回调里也都重算（主模型变了排序要跟着变）",
+    (() => {
+      const rowCb = raw.split('$("sceneRecBody").addEventListener("click"')[1].split("});")[0] || "";
+      return (rowCb.match(/renderSceneRec\(\)/g) || []).length >= 2;
+    })());
+  // ⚠️ 扫描范围必须覆盖**事件绑定**，不能只扫 renderSceneRec：首跑变异把写请求塞在
+  //    「设为主模型」的点击回调里，只扫渲染函数就漏检了（0 红）。改成扫整段三场景代码
+  //    ——从推荐列表常量起到 renderSceneCards 之前，加上 sceneRecBody 的委托块。
+  check("SR-005c：推荐列表连同行内动作都没有写端点（不得成为第二个写入口，SD-6）",
+    (() => {
+      const recSec = raw.split("const SCENE_REC_STALE_MIN")[1].split("// renderSceneCards 渲染三张场景卡片")[0] || "";
+      const bindSec = raw.split('$("sceneRecBody").addEventListener')[1].split('$("btnEffAdd")')[0] || "";
+      return !recSec.includes("/api/config/") && !bindSec.includes("/api/config/");
+    })());
+  check("SR-005c：style.css 有 .scene-rec / .rec-row / .rec-state 样式",
+    cssSrc.includes(".scene-rec") && cssSrc.includes(".rec-row") && cssSrc.includes(".rec-state"));
+  check("SR-005c：新增 CSS 无裸 hex 兜底（--warn 等已定义，不得写 fallback 值）",
+    !/rec-[^}]*var\(--[a-z]+, *#/.test(cssSrc));
 }
 
 // ---- 输出 ----
