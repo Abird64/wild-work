@@ -782,6 +782,36 @@ func TestSceneRoutingSaveFailureDoesNotPushSyncers(t *testing.T) {
 	if raw, err := os.ReadFile(filepath.Join(filepath.Dir(a.cfgPath), "config.json")); err == nil && len(raw) > 0 {
 		t.Errorf("落盘失败却留下了文件内容（%d 字节）", len(raw))
 	}
+
+	// ❗ 内存态也必须回滚（2026-10-29 独立审核实测抓到的缺陷，原断言只查 400 + syncer 未推 ⇒ 绿而漏）。
+	// 没有这条会怎样：cfg 四个字段已被改成新值、Save 失败后不回滚 ⇒
+	//   ① `GET /api/state` 立刻把"没落盘的新值"回显给面板（用户以为存成功了）；
+	//   ② 之后任意一次无关保存成功会把这批值写进 config.json（永久固化）。
+	// 用户收到的是"保存失败"，实际却已生效 —— 比"内存新磁盘旧"更难发现。
+	a.mu.Lock()
+	gotDC, gotCap := a.cfg.Compat.DefaultChannel, a.cfg.Compat.MaxTokensCap
+	gotMap := map[string]string{}
+	for k, v := range a.cfg.Compat.ModelMap {
+		gotMap[k] = v
+	}
+	gotRules := append([]config.ModelFallbackRule(nil), a.cfg.ModelFallback...)
+	a.mu.Unlock()
+
+	if gotDC != "" && gotDC != "workbuddy" {
+		t.Errorf("落盘失败后 default_channel 被改成 %q（应回滚）", gotDC)
+	}
+	if gotCap != 32000 && gotCap != 0 {
+		t.Errorf("落盘失败后 max_tokens_cap 被改成 %d（应回滚）", gotCap)
+	}
+	// cfg 默认是空 model_map，本次提交必然想写三个别名键 ⇒ 回滚成功则一个都没有。
+	for _, sc := range goodScenes() {
+		if _, ok := gotMap[sc.Alias]; ok {
+			t.Errorf("落盘失败后 model_map[%q] 已被写入（应回滚），实际 map=%v", sc.Alias, gotMap)
+		}
+	}
+	if len(gotRules) != 0 {
+		t.Errorf("落盘失败后 model_fallback 已被写入 %d 条（应回滚）", len(gotRules))
+	}
 }
 
 // TestSceneRoutingIdempotentDeepEqual 在 newPanelApp 沙箱内做一次「三场景不变、仅保存」的幂等提交：
@@ -890,4 +920,123 @@ func funcBody(t *testing.T, src, decl string) string {
 		return rest[:j+1]
 	}
 	return rest
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-29 独立审核抓到的绕过：旧端点未复用 I4 / I8 判据
+// ---------------------------------------------------------------------------
+
+// TestSetCompatRejectsAliasInValue 旧端点 `POST /api/config/compat` 也必须拒收「别名指向别名」。
+//
+// 为什么这条必须有（审核实测）：`model_fallback` 提交 `from=workbuddy/fast` → 200 并落盘；
+// `compat` 提交 `code=workbuddy/fast` → 200。而同样形态走 `scene_routing` → 400。
+// 即 **R127 的 I4 只在新端点上成立**，旧端点仍是敞开的后门。
+// 运行期后果：`SplitModelID` 拆出的真实 model 永远不等于别名 ⇒ 整条链静默永不触发且不报错。
+func TestSetCompatRejectsAliasInValue(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	mux := panelMux(a)
+
+	cases := []struct{ name, body string }{
+		{"场景别名键指向别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"code":"workbuddy/fast"}}`},
+		{"裸别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"fast":"complex"}}`},
+	}
+	for _, tc := range cases {
+		w := doReq(mux, "POST", "/api/config/compat", tc.body, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s：应 400，实际 %d: %s", tc.name, w.Code, w.Body.String())
+			continue
+		}
+		if !strings.Contains(w.Body.String(), "scene_alias_in_model") {
+			t.Errorf("%s：错误码应为 scene_alias_in_model，实际 %s", tc.name, w.Body.String())
+		}
+	}
+
+	// 反向护栏：用户自建的**非场景键**指向别名，不归本判据管（他自己负责）。
+	w := doReq(mux, "POST", "/api/config/compat",
+		`{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"gpt-5*":"workbuddy/deepseek-v4.1-flash"}}`, nil)
+	if w.Code != http.StatusOK {
+		t.Errorf("非场景键应放行，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSetCompatRejectsSceneMapMismatch 旧端点也必须拒收「别名指向与链 From 不一致」（I8）。
+//
+// 审核实测的绕过路径：先用 scene_routing 建一致态，再用 compat 把 model_map[fast]
+// 改成 raccoon/OTHER → 200 且落盘 ⇒ 别名指向与链 From 分裂，降级静默失效。
+func TestSetCompatRejectsSceneMapMismatch(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	mux := panelMux(a)
+
+	// 先建一致态（走原子端点）。
+	if w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, goodScenes(), nil), nil); w.Code != http.StatusOK {
+		t.Fatalf("建一致态失败 %d: %s", w.Code, w.Body.String())
+	}
+	a.mu.Lock()
+	cur := a.cfg.Compat.ModelMap["fast"]
+	a.mu.Unlock()
+
+	// 用旧端点把别名改到一个没有对应规则的值 ⇒ 必须拒。
+	bad := `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"fast":"raccoon/sn-kinji-other","code":"` +
+		a.cfg.Compat.ModelMap["code"] + `","complex":"` + a.cfg.Compat.ModelMap["complex"] + `"}}`
+	w := doReq(mux, "POST", "/api/config/compat", bad, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("别名与链 From 分裂应 400，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "scene_map_mismatch") {
+		t.Errorf("错误码应为 scene_map_mismatch，实际 %s", w.Body.String())
+	}
+	// 落盘不得被改动 ⇒ 回读别名仍是原值。
+	a.mu.Lock()
+	got := a.cfg.Compat.ModelMap["fast"]
+	a.mu.Unlock()
+	if got != cur {
+		t.Errorf("被拒后 model_map[fast] 变成 %q（应仍为 %q）", got, cur)
+	}
+
+	// 反向护栏：**原样提交**（别名与链一致）必须放行，否则「只改 default_channel」也会被误拦。
+	ok := `{"default_channel":"oczen","max_tokens_cap":32000,"model_map":{"fast":"` + cur +
+		`","code":"` + a.cfg.Compat.ModelMap["code"] + `","complex":"` + a.cfg.Compat.ModelMap["complex"] + `"}}`
+	if w := doReq(mux, "POST", "/api/config/compat", ok, nil); w.Code != http.StatusOK {
+		t.Errorf("别名与链一致时应放行，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSceneRoutingRejectsDirtyCompat 原子端点作为唯一写入口，应拦住两类脏值
+// （2026-10-29 独立审核的低危项：-5 与空 default_channel 原本都 200 原样落盘）。
+func TestSceneRoutingRejectsDirtyCompat(t *testing.T) {
+	cases := []struct{ name, body, wantCode string }{
+		{"负数封顶", sceneBody(t, goodScenes(), map[string]any{"max_tokens_cap": -5}), "scene_bad_shape"},
+		{"空默认渠道", sceneBody(t, goodScenes(), map[string]any{"default_channel": ""}), "scene_bad_shape"},
+	}
+	for _, tc := range cases {
+		a := newPanelApp(t, "127.0.0.1", "")
+		mux := panelMux(a)
+		path := cfgFilePath(a)
+		w := doReq(mux, "POST", "/api/config/scene_routing", tc.body, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s：应 400，实际 %d: %s", tc.name, w.Code, w.Body.String())
+			continue
+		}
+		if !strings.Contains(w.Body.String(), tc.wantCode) {
+			t.Errorf("%s：错误码应为 %s，实际 %s", tc.name, tc.wantCode, w.Body.String())
+		}
+		if got := readCfgBytes(t, path); string(got) != "" {
+			t.Errorf("%s：被拒却写入 config.json", tc.name)
+		}
+	}
+}
+
+// TestValidateFallbackRulesDedupesTo 同一备胎重复出现应去重（保留首次顺序），不报错。
+func TestValidateFallbackRulesDedupesTo(t *testing.T) {
+	rules := []config.ModelFallbackRule{
+		{From: "a/m", To: []string{"b/m", "b/m", "c/m", "b/m"}},
+	}
+	if err := validateFallbackRules(rules); err != nil {
+		t.Fatalf("重复备胎不应报错（应从别处粘贴时容忍）：%v", err)
+	}
+	got := rules[0].To
+	want := []string{"b/m", "c/m"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("去重结果 = %v，期望 %v（保留首次出现顺序）", got, want)
+	}
 }

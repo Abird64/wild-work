@@ -114,11 +114,20 @@ func (k Kind) String() string { return string(k) }
 // （server 侧 getRuntime 内建优先，而 app 侧 UpdateCustomRuntimes 无条件覆盖），
 // 表现为「面板/账号操作打到自定义池、对话请求走内建渠道」——不报错但静默出错。
 // 同时排除 ModelNamespaces 里的上游命名空间（如 cline-free），以免路由歧义。
+// BuiltinKinds 返回「内建渠道 kind 集合」，供两处判据使用：
+//   - scene routing 的 I5 渠道白名单（未知前缀 ⇒ 拒收）
+//   - 自定义渠道的重名护栏（不得占用内建名，R66）
+//
+// ⚠️ **这里漏一个 kind 的代价是"两条渠道同时坏"**：
+// ① 该渠道不能用于三场景（提交即被当成"渠道名拼错了"）；
+// ② 自定义渠道**可以**用它当名字，于是面板打自定义池、对话走内建渠道，静默错路由。
+// 2026-10-29 实测踩过：`doubao` / `doubaowork` 漏列，导致这两个已上线渠道提交三场景时 400。
+// 护栏见 `TestBuiltinKindsCoversAllKindConsts`（漏列即红），**新增 Kind 常量时必须同步这里**。
 func BuiltinKinds() map[string]bool {
 	m := map[string]bool{}
 	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-		Gemini, CodeArts, ZCode} {
+		Gemini, CodeArts, ZCode, Doubao, Doubaowork} {
 		m[k.String()] = true
 	}
 	for ns := range ModelNamespaces {

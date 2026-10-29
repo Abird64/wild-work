@@ -230,6 +230,7 @@ const patched =
   + ", __setSceneRecState: (open, tab) => { sceneRecOpen = !!open; sceneRecTab = tab; }"
   + ', SCENE_STATE_META: typeof SCENE_STATE_META === "object" ? SCENE_STATE_META : null'
   + ', renderSceneRec: typeof renderSceneRec === "function" ? renderSceneRec : () => {}'
+  + ', syncSceneSideViews: typeof syncSceneSideViews === "function" ? syncSceneSideViews : () => {}'
   + ', sceneFeeAgeMinutes: typeof sceneFeeAgeMinutes === "function" ? sceneFeeAgeMinutes : () => null'
   + ', sceneAgeLabel: typeof sceneAgeLabel === "function" ? sceneAgeLabel : () => ""'
   + " };";
@@ -954,14 +955,55 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   T.__setState({ compat: { default_channel: "qwenwork", max_tokens_cap: 32000, model_map: compat.model_map }, model_fallback: fallback });
 
   // ⑥ 回读不一致必须报错（不得静默当成功）
+  //
+  // ⚠️ 2026-10-29 独立审核抓到：原断言用 `T.sceneNormalize(compat, fallback)` 当期望值，
+  // 而生产路径上 sceneRules 会被服务端返回的 res **先覆盖再比对** —— 断言测的是"函数的意图"，
+  // 不是"生产的调用顺序"，于是自证缺陷全绿。现在按生产语义测：期望值 = **请求前快照**。
   T.__setSceneRules(T.sceneNormalize(compat, fallback));
-  const good = { model_map: compat.model_map };
-  check("SR-005b：回读一致时 verifySceneReadback 返回空串", T.verifySceneReadback(good) === "", T.verifySceneReadback(good));
-  const bad = { model_map: Object.assign({}, compat.model_map, { fast: "someone/else" }) };
-  const msg = T.verifySceneReadback(bad);
-  check("SR-005b：回读不一致时报出差异（含期望与实际）",
+  const expected = T.scenePayload(); // 等价于 saveSceneRouting 里发请求前取的 expected
+  const good = { model_map: compat.model_map, model_fallback: fallback };
+  check("SR-005b：回读一致时 verifySceneReadback 返回空串",
+    T.verifySceneReadback(good, expected) === "", T.verifySceneReadback(good, expected));
+
+  // from 不一致
+  const bad = { model_map: Object.assign({}, compat.model_map, { fast: "someone/else" }), model_fallback: fallback };
+  const msg = T.verifySceneReadback(bad, expected);
+  check("SR-005b：主模型不一致时报出差异（含期望与实际）",
     msg.includes("fast") && msg.includes("qwenwork/flash") && msg.includes("someone/else"), msg);
-  check("SR-005b：服务端没回 model_map 时不误报（返回空串）", T.verifySceneReadback({}) === "");
+
+  // to 项数减少（服务端会 trim/去空项）——原实现只比 from，这类差异检不出
+  const badTo = {
+    model_map: compat.model_map,
+    model_fallback: [{ from: "qwenwork/flash", to: ["traecode/deepseek-v4.1-flash"] },
+                     { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
+                     { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] }],
+  };
+  const toMsg = T.verifySceneReadback(badTo, expected);
+  check("SR-005b：备胎链项数被静默删减时报错（原实现只比 from ⇒ 漏）",
+    toMsg.includes("项数") && toMsg.includes("fast"), toMsg);
+
+  // to 顺序被改
+  const badOrder = {
+    model_map: compat.model_map,
+    model_fallback: [{ from: "qwenwork/flash", to: ["qodercn/glm-5.3-flash", "traecode/deepseek-v4.1-flash"] },
+                     { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
+                     { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] }],
+  };
+  const ordMsg = T.verifySceneReadback(badOrder, expected);
+  check("SR-005b：备胎链顺序被改时报错（序号有语义）",
+    ordMsg.includes("顺序") && ordMsg.includes("fast"), ordMsg);
+
+  check("SR-005b：服务端没回 model_map 时不误报（返回空串）", T.verifySceneReadback({}, expected) === "");
+  check("SR-005b：没传期望快照时不误报（返回空串）", T.verifySceneReadback(good) === "");
+  // 断言生产路径确实传了快照（防有人改回"读被覆盖后的 sceneRules"）
+  check("SR-005b：保存路径把**请求前**快照传给校验（不是覆盖后的编辑态）",
+    (() => {
+      const fn = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
+      const iExp = fn.indexOf("const expected = scenePayload()");
+      const iSave = fn.indexOf("/api/config/scene_routing");
+      const iVerify = fn.indexOf("verifySceneReadback(res, expected)");
+      return iExp > 0 && iExp < iSave && iVerify > 0;
+    })());
 
   // ⑦ 改主模型 / 追加备胎的本地守卫
   T.__setSceneRules(T.sceneNormalize(compat, fallback));
@@ -1178,6 +1220,56 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     finalHtml.includes("仅供参考") && finalHtml.includes("可自由选择"));
   check("SR-005c：头部显示候选总数", /共 \d+ 个候选/.test(finalHtml));
   check("SR-005c：头部显示费率快照时刻（cached_at 原文）", finalHtml.includes("10-29 12:10"));
+
+  // ⑧b 派生视图同步（2026-10-29 独立审核抓到的加重情节）
+  // 审核实测：mapText / fbRules 只在 openSettings 灌一次，三场景保存后仍是旧副本 ⇒
+  // ① 回设置点通用「保存」会按旧文本重写 model_map（静默回滚场景保存、绕过全部校验）；
+  // ② fbDirty 会因程序自身的差异点亮「未保存」（与 SR-003 的 G1 同形）。
+  {
+    const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+    // 静态面：syncSceneSideViews 存在、被 saveSceneRouting 调用、且 openSettings 记了 baseline
+    check("SR-005b：存在 syncSceneSideViews 并在保存后被调用",
+      typeof T.syncSceneSideViews === "function" &&
+      (() => { const fn = raw.split("async function saveSceneRouting")[1].split("async function")[0] || ""; return fn.includes("syncSceneSideViews()"); })());
+    check("SR-005b：openSettings 给 mapText 记了 baseline（判断「用户有没有动过」的依据）",
+      /mapText"\)\.dataset\.baseline/.test(raw));
+    // 行为面：用户改过 mapText ⇒ 不得覆盖；没改过 ⇒ 必须刷成最新
+    check("SR-005b：mapText 用户改过时不被覆盖（保护编辑态）",
+      (() => {
+        const box = document.getElementById("mapText");
+        box.value = "user-edited-content";
+        box.dataset = { baseline: "old-baseline" };
+        T.__setState({ compat: { model_map: { fast: "a/b" }, default_channel: "x", max_tokens_cap: 1 }, model_fallback: [] });
+        T.syncSceneSideViews();
+        return box.value === "user-edited-content";
+      })());
+    check("SR-005b：mapText 未被改动时刷成最新 model_map",
+      (() => {
+        const box = document.getElementById("mapText");
+        box.value = "old-baseline";
+        box.dataset = { baseline: "old-baseline" };
+        T.__setState({ compat: { model_map: { fast: "qwenwork/flash", code: "traework/x" }, default_channel: "x", max_tokens_cap: 1 }, model_fallback: [] });
+        T.syncSceneSideViews();
+        return box.value.includes("qwenwork/flash") && box.dataset.baseline === box.value;
+      })());
+    // fbRules：有未保存编辑时不得被覆盖
+    check("SR-005b：fbRules 有未保存编辑时不被覆盖（不吞用户改动）",
+      (() => {
+        T.__setState({ compat: { model_map: {}, default_channel: "x", max_tokens_cap: 1 },
+                       model_fallback: [{ from: "srv/a", to: ["srv/b"] }] });
+        T.__setFbRules([{ from: "user/edited", to: ["x/y"] }]);
+        T.syncSceneSideViews();
+        return T.__getFbRules()[0].from === "user/edited";
+      })());
+    check("SR-005b：fbRules 无差异时同步到服务端态（消除假脏标记）",
+      (() => {
+        const srv = [{ from: "srv/a", to: ["srv/b"] }];
+        T.__setState({ compat: { model_map: {}, default_channel: "x", max_tokens_cap: 1 }, model_fallback: srv });
+        T.__setFbRules(srv);
+        T.syncSceneSideViews();
+        return JSON.stringify(T.__getFbRules()) === JSON.stringify(srv);
+      })());
+  }
 
   // ⑨ 接线静态面
   const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");

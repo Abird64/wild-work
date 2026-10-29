@@ -2831,6 +2831,46 @@ function scenePayload(extra) {
   return Object.assign(body, extra || {});
 }
 
+// syncSceneSideViews 把「三场景」之外的**同源派生视图**同步到最新 state。
+//
+// 为什么必须有（2026-10-29 独立审核抓到的加重情节）：
+//   ① `#mapText`（设置→模型路由→映射表）只在 `openSettings` 时从 model_map 灌一次，`render()` 从不刷新；
+//      于是「打开过设置 → 在三场景卡片里保存 → 回设置点通用『保存』」会按**旧文本**重写 model_map，
+//      把刚保存的别名值静默回滚，且绕过全部场景校验。
+//   ② `fbRules` 同样只灌一次 ⇒ 三场景保存后它仍是旧副本，`updateFbDirty` 会因**程序自身**造成的差异
+//      点亮「⚠ 有未保存的调整」——与 SR-003 已修掉的 G1（假脏标记催用户落盘）同形，只是换了来源。
+//
+// **不覆盖用户编辑**（这点很关键，否则修好一个坏、引入另一个更坏的）：
+//   - mapText：仅当它当前内容仍等于「打开时灌进去的那份」才刷新；用户改过就不动。
+//   - fbRules：仅当它与服务端当前态**逐字节相等**（= 无未保存编辑）时才刷新。
+// 判据都基于「有没有用户改动」，不是「是不是开着」。
+function syncSceneSideViews() {
+  if (!state) return;
+  const cc = state.compat || {};
+  const map = cc.model_map || {};
+  const mapText = $("mapText");
+  if (mapText && mapText.dataset.baseline !== undefined) {
+    const cur = mapText.value;
+    const fresh = Object.entries(map).map(([k, v]) => `${k} = ${v}`).join("\n");
+    // 只有「用户没动过」才覆盖（baseline = 上次灌进去的内容）
+    if (cur === mapText.dataset.baseline) {
+      mapText.value = fresh;
+      mapText.dataset.baseline = fresh;
+    }
+  }
+  // 降级链编辑态：只在没有未保存差异时同步
+  if (typeof fbRules !== "undefined" && $("fbList")) {
+    const serverNow = JSON.stringify(state.model_fallback || []);
+    if (JSON.stringify(fbRules) === JSON.stringify(serverNow) || fbRules.length === 0) {
+      fbRules = JSON.parse(JSON.stringify(state.model_fallback || []));
+      renderFbList();
+    } else {
+      // 有用户编辑：只更新脏标记基准，不覆盖数据（否则会吞掉用户正在改的东西）
+      updateFbDirty();
+    }
+  }
+}
+
 // sceneConfigText 生成「复制当前配置」与「保存前自动备份」共用的文本（同一份，避免两处漂移）。
 // 格式刻意用可直接回粘的结构（JSON）+ 一行人类可读摘要：纯 JSON 手改容易，纯文本手改更容易但改不回 JSON。
 function sceneConfigText() {
@@ -3204,7 +3244,14 @@ async function saveSceneRouting() {
   let backedUp = false;
   try {
     backedUp = await sceneBackup();
-    const res = await api("/api/config/scene_routing", scenePayload());
+    // ❗ 回读校验必须拿「**发请求前**的期望值」比对。
+    //
+    // 2026-10-29 独立审核抓到的缺陷：原实现顺序是「先用 res 覆盖 state → 再用 res 重算 sceneRules
+    // → 再拿 sceneRules 与 res 比」= **自证**，生产路径上永远返回一致；且只比 from 不比 to
+    // （服务端会对 to 做 trim/去空项，这类差异检不出）。用户拿到的"已回读校验"是假的。
+    // 现在：请求前把期望值（含 to 数组）固定成快照，校验只读快照，不读被覆盖后的编辑态。
+    const expected = scenePayload();
+    const res = await api("/api/config/scene_routing", expected);
     // 用服务端返回值覆盖编辑态与基准（不信前端算的，A-3）
     if (res && res.model_map) {
       state.compat = state.compat || {};
@@ -3217,13 +3264,14 @@ async function saveSceneRouting() {
     renderSceneCards();
     showSceneServerWarn(res);
     // 回读校验：服务端口径才是真相，比对三别名指向与服务端返回值是否一致。
-    const mismatch = verifySceneReadback(res);
+    const mismatch = verifySceneReadback(res, expected);
     if (mismatch) {
       $("sceneErr").textContent = `已保存，但回读不一致：${mismatch}`;
       toast("已保存但回读不一致，请检查");
     } else {
       toast(backedUp ? "三场景已保存（旧值已复制到剪贴板）" : "三场景已保存（⚠ 旧值复制失败，请手动备份）");
     }
+    syncSceneSideViews(); // 同步 mapText / fbRules 派生视图（防"通用保存把别名值回滚"与"假脏标记"）
     loadState(); // 让面板其它区域（compat 摘要、降级链列表）同步到新值
   } catch (e) {
     $("sceneErr").textContent = e.message;
@@ -3233,14 +3281,35 @@ async function saveSceneRouting() {
   }
 }
 
-// verifySceneReadback 比对「提交的期望值」与「服务端返回的实际值」，不一致返回差异描述（空串=一致）。
-function verifySceneReadback(res) {
-  if (!res || !res.model_map) return "";
+// verifySceneReadback 比对「**发请求前**的期望值」与「服务端返回的实际值」，不一致返回差异描述（空串=一致）。
+//
+// ⚠️ expected 必须是请求前的快照（由 saveSceneRouting 传入），**不能**读 sceneRules ——
+// 那时 sceneRules 已被 res 覆盖，拿它比对等于自证（2026-10-29 独立审核实测抓到的缺陷）。
+//
+// 比两样：① 每个别名的 from ② 该场景降级链的 to **逐项**（顺序有语义，服务端还会 trim/去空项，
+// 这些差异必须在用户面前显形，否则"回读一致"是假的）。
+function verifySceneReadback(res, expected) {
+  if (!res || !res.model_map || !expected) return "";
   const diff = [];
-  for (const { alias } of SCENE_ALIASES) {
-    const want = String((sceneRules[alias] || {}).from || "").trim();
-    const got = String(res.model_map[alias] || "").trim();
-    if (want && got !== want) diff.push(`${alias} 期望 ${want}，服务端为 ${got || "（空）"}`);
+  const resTo = {};
+  for (const r of res.model_fallback || []) {
+    resTo[String(r.from || "").trim()] = (r.to || []).map((t) => String(t || "").trim()).filter(Boolean);
+  }
+  for (const sc of expected.scenes || []) {
+    const alias = sc.alias;
+    const wantFrom = String(sc.from || "").trim();
+    const gotFrom = String(res.model_map[alias] || "").trim();
+    if (wantFrom && gotFrom !== wantFrom) {
+      diff.push(`${alias} 主模型期望 ${wantFrom}，服务端为 ${gotFrom || "（空）"}`);
+      continue; // from 都不一致时链已无对照意义
+    }
+    const wantTo = (sc.to || []).map((t) => String(t || "").trim()).filter(Boolean);
+    const gotTo = resTo[wantFrom] || [];
+    if (wantTo.length !== gotTo.length) {
+      diff.push(`${alias} 备胎链项数期望 ${wantTo.length}，服务端为 ${gotTo.length}（${gotTo.join(" → ") || "空"}）`);
+    } else if (wantTo.join("\n") !== gotTo.join("\n")) {
+      diff.push(`${alias} 备胎链顺序/内容不一致：期望 ${wantTo.join(" → ")}，服务端 ${gotTo.join(" → ")}`);
+    }
   }
   return diff.join("；");
 }
@@ -3689,7 +3758,9 @@ async function openSettings() {
   const entries = Object.entries(map);
   $("mapSummary").textContent = entries.length === 0 ? "（空）" : entries.map(([k,v]) => `${k} → ${v}`).join("\u00A0 \u00A0");
   // 映射编辑器：随对话框打开而重置为当前值，收起
-  $("mapText").value = entries.map(([k,v]) => `${k} = ${v}`).join("\n");
+  const mapTextVal = entries.map(([k,v]) => `${k} = ${v}`).join("\n");
+  $("mapText").value = mapTextVal;
+  $("mapText").dataset.baseline = mapTextVal; // 供 syncSceneSideViews 判断"用户有没有动过"
   $("mapEditor").classList.add("hidden");
   $("mapErr").textContent = "";
   renderMapPresets(channels);

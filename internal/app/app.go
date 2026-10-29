@@ -2653,12 +2653,30 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 	if modelMap == nil {
 		modelMap = map[string]string{}
 	}
-	for _, v := range modelMap {
+	for k, v := range modelMap {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("model_map 的值不能为空（应为 channel/model）")
 		}
+		// ⚠️ **别名判定必须排在「含 /」形状判定之前**：裸别名（如 `complex`）天然不含斜杠，
+		// 先判形状会把它误报成「需为 channel/model 形式」，用户照着格式提示改还是错。
+		// 这与 SR-005b 前端 sceneProblems 里踩过的是同一个坑（那边已修，这里补上）。
+		if hit, ok := sceneAliasIn(v); ok {
+			return fmt.Errorf("scene_alias_in_model: model_map 的 %q 指向了别名 %q（%q）——"+
+				"要写 渠道/模型 全路径；写别名会让整条链永不触发且不报错（R127 I4/SD-8）", k, hit, v)
+		}
 		if strings.Index(v, "/") <= 0 {
 			return fmt.Errorf("model_map 值 %q 需为 channel/model 形式", v)
+		}
+	}
+	// I8 跨字段一致性：场景别名键的新值必须与该别名**当前**的降级链 From 一致，
+	// 否则会写出「别名指向 A、链主模型是 B」的分裂态（降级静默失效）。
+	// 判据在锁外取旧 cfg 快照：锁内的 a.cfg 即将被覆盖，拿不到"当前链 From"。
+	curChainFrom := a.sceneChainFromSnapshot()
+	for alias, from := range curChainFrom {
+		if v, ok := modelMap[alias]; ok && strings.TrimSpace(v) != "" && strings.TrimSpace(v) != from {
+			return fmt.Errorf("scene_map_mismatch: 别名 %q 指向 %q，但它的链主模型是 %q——"+
+				"两者不一致会让降级静默失效；请改用 POST /api/config/scene_routing 一次改两处（R127 I8）",
+				alias, v, from)
 		}
 	}
 	a.mu.Lock()
@@ -2923,6 +2941,7 @@ func validateFallbackRules(rules []config.ModelFallbackRule) error {
 		}
 		seen[r.From] = true
 		tos := make([]string, 0, len(r.To))
+		seenTo := make(map[string]bool, len(r.To))
 		for _, to := range r.To {
 			to = strings.TrimSpace(to)
 			if to == "" {
@@ -2934,6 +2953,14 @@ func validateFallbackRules(rules []config.ModelFallbackRule) error {
 			if to == r.From {
 				return fmt.Errorf("主模型 %q 的备胎不能是它自己", r.From)
 			}
+			// 同一个备胎重复出现只保留首次（保持用户排的顺序）。
+			// 为什么去重而不是报错（2026-10-29 审核发现的低危项）：重复项运行期只会让
+			// `pickModelFallback` 对同一备胎多试一次（无效但不出错），而报错会让
+			// 「从别处粘一串备胎名」这种高频操作直接失败。静默去重 + 保留首现语义最省事。
+			if seenTo[to] {
+				continue
+			}
+			seenTo[to] = true
 			tos = append(tos, to)
 		}
 		if len(tos) == 0 {
@@ -3041,6 +3068,33 @@ func (a *App) knownSceneChannels() (map[string]bool, []string) {
 	}
 	sort.Strings(names)
 	return set, names
+}
+
+// sceneChainFromSnapshot 返回「场景别名 → 它当前降级链的 From」快照（只读、加锁取副本）。
+//
+// 用途：旧端点 `SetCompat` 做 I8 跨字段一致校验时需要知道"链主模型现在是谁"，
+// 而它自己的写入路径会把 `a.cfg.Compat.ModelMap` 覆盖掉 —— 必须在校验阶段先取快照。
+//
+// 只取**能对上的**别名：某个别名指向的模型没有对应规则时（已经是坏状态），不参与校验，
+// 避免用一条不存在的链去阻止用户修好它。
+func (a *App) sceneChainFromSnapshot() map[string]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[string]string, len(sceneAliases))
+	mm := a.cfg.Compat.ModelMap
+	for _, alias := range sceneAliases {
+		from := strings.TrimSpace(mm[alias])
+		if from == "" {
+			continue
+		}
+		for _, r := range a.cfg.ModelFallback {
+			if strings.TrimSpace(r.From) == from {
+				out[alias] = from
+				break
+			}
+		}
+	}
+	return out
 }
 
 // sceneModelCatalog 返回「渠道 kind（小写）→ 该渠道当前可解析的模型 ID 集合」，供 I6 判存在性。
@@ -3251,6 +3305,18 @@ func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) 
 		}
 	}
 
+	// ⑥ compat 两项基本校验（2026-10-29 审核的低危项）：
+	// `max_tokens_cap` 负数语义上是脏值（clampMaxTokens 对 <=0 视作不限制，故 -5 无害但会原样落盘）；
+	// `default_channel` 空串等于把「裸名兜底渠道」关掉（路由层会回 "needs an explicit channel prefix"，
+	// 用户会以为模型丢了）。两项既有端点也不校验（非回归），但原子端点作为唯一写入口应当拦住。
+	if req.MaxTokensCap < 0 {
+		return nil, fmt.Errorf("scene_bad_shape: 封顶 tokens 不能为负数（%d）；0 表示不限制", req.MaxTokensCap)
+	}
+	dc := strings.TrimSpace(req.DefaultChannel)
+	if dc == "" {
+		return nil, fmt.Errorf("scene_bad_shape: 默认渠道不能为空——裸名模型（不带 渠道/ 前缀）会没有兜底渠道")
+	}
+
 	// ④ I5：from/to 每一项的渠道前缀必须属于「已知渠道集合」（内建 ∪ 运行时自定义 ∪ 上游命名空间）。
 	// 必须在 a.mu.Lock() 之前做：knownSceneChannels 自己要拿 a.mu（锁不可重入）。
 	// 文案列出已知渠道：用户自查靠它（「是不是我把渠道名拼错了」是最高频的一类）。
@@ -3321,11 +3387,31 @@ func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) 
 		return res, nil // 只校验 + 回清单；不落盘、不推 syncer
 	}
 
+	// 改 cfg **之前**先留一份快照：Save 失败必须整体回滚。
+	//
+	// 为什么不能只 return err（2026-10-29 独立审核实测抓到的缺陷）：
+	// 下面的赋值发生在 Save 之前，若 Save 失败而直接返回，内存里已经是"新值"而磁盘还是旧值。
+	// 更糟的是它**不会自己恢复**——`GET /api/state` 立刻把没落盘的新值回显给面板（用户以为存了），
+	// 之后任意一次无关保存（如 SetReasoningEfforts）会把这批值顺手写进 config.json（永久固化）。
+	// 用户收到的是"保存失败"，实际却生效了，重启前无人能发现。
+	// 回滚点只有这四个字段（其余 cfg 字段本端点不碰）。
+	prevDC := a.cfg.Compat.DefaultChannel
+	prevCap := a.cfg.Compat.MaxTokensCap
+	prevMap := a.cfg.Compat.ModelMap
+	prevFallback := a.cfg.ModelFallback
+
 	a.cfg.Compat.DefaultChannel = req.DefaultChannel
 	a.cfg.Compat.MaxTokensCap = req.MaxTokensCap
 	a.cfg.Compat.ModelMap = newMap
 	a.cfg.ModelFallback = merged
 	err := config.Save(a.cfg, a.cfgPath)
+	if err != nil {
+		// 锁内回滚（还没 Unlock），保证"要么全成、要么全不动"。
+		a.cfg.Compat.DefaultChannel = prevDC
+		a.cfg.Compat.MaxTokensCap = prevCap
+		a.cfg.Compat.ModelMap = prevMap
+		a.cfg.ModelFallback = prevFallback
+	}
 	a.mu.Unlock()
 	if err != nil {
 		return nil, err
