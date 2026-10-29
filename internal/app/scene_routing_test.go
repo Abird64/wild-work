@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -709,4 +710,184 @@ func TestSceneRoutingNamespaceIsSameChannelForI7(t *testing.T) {
 	if !strings.Contains(joined, "skipSameChannel") {
 		t.Errorf("命名空间与 kind 的两种写法是同一渠道，必须报 I7 警告，实际 %v", res.Warnings)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// SR-004c：落盘失败时的行为（变异⑤ 的可测面）+ 幂等提交深度相等
+// ---------------------------------------------------------------------------
+
+// newSceneAppWithBadConfigPath 构造一个 configPath 指向**必然写不进去**的位置的 App。
+//
+// 为什么不用 chmod/chattr（卡上明确排除）：跨平台不稳、且在 root/容器里可能仍可写。
+// 这里用「父路径是一个已存在的**普通文件**」——config.Save 里的 os.MkdirAll 对它必然报
+// "not a directory"，随后的 os.WriteFile 也必然失败。判据是**文件系统语义**而非权限位，
+// Windows/macOS/Linux 三种平台上行为一致。
+func newSceneAppWithBadConfigPath(t *testing.T) *App {
+	t.Helper()
+	dir := t.TempDir()
+	// 先造一个普通文件，再把它当作「config.json 的父目录」——路径形状非法但交给 Save 去撞。
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("造阻塞文件: %v", err)
+	}
+	good := filepath.Join(dir, "config.json")
+
+	cfg := config.Default()
+	cfg.StateFile = filepath.Join(dir, "state.json")
+	cfg.AuthDir = dir
+	cfg.Listen = config.Listen{Host: "127.0.0.1", Port: 7864}
+
+	p := pool.New(filepath.Join(dir, "state-workbuddy.json"))
+	p.Add(&auth.Auth{Kind: "workbuddy", UID: "wb-1", AccessToken: "t", RefreshToken: "r"})
+	rts := map[provider.Kind]*Runtime{
+		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: p, Upstream: &fakeUpstream{remain: 10}},
+	}
+	// ConfigPath 指向 blocker 之下：MkdirAll 必然失败。
+	a, err := New(Options{
+		ConfigPath: filepath.Join(blocker, "config.json"),
+		Config:     cfg,
+		Runtimes:   rts,
+	})
+	if err != nil {
+		// New 在启动时可能自己就尝试写盘并失败 —— 那也算「构造成功但不可写」，
+		// 但我们仍需要 a 存在，故这里要求 New 成功（它不做首次 Save）。
+		t.Fatalf("New 失败（该用例需要 App 可构造、只在 Save 时失败）: %v", err)
+	}
+	_ = good
+	t.Cleanup(a.Close)
+	return a
+}
+
+// TestSceneRoutingSaveFailureDoesNotPushSyncers 变异⑤：落盘失败 ⇒ 返回错误 **且** 两个 syncer 都不得被调用。
+//
+// 为什么这条必须有：若实现「先推 syncer 再 Save」或「Save 失败仍然推」，内存会立刻变成新值而
+// 磁盘还是旧值 —— 面板显示已保存、重启后配置丢失，是最难被用户发现的一类不一致。
+// 正确顺序只能是：锁内改 cfg → Save → **Save 成功后才推 syncer**。
+func TestSceneRoutingSaveFailureDoesNotPushSyncers(t *testing.T) {
+	a := newSceneAppWithBadConfigPath(t)
+
+	var compatCalls, fbCalls int
+	a.SetCompatSyncer(func(string, int, map[string]string) { compatCalls++ })
+	a.SetModelFallbackSyncer(func([]config.ModelFallbackRule) { fbCalls++ })
+
+	mux := panelMux(a)
+	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, goodScenes(), nil), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("落盘失败应回 400（不是 200），实际 %d: %s", w.Code, w.Body.String())
+	}
+	if compatCalls != 0 || fbCalls != 0 {
+		t.Errorf("落盘失败却推了 syncer：compat=%d fb=%d，期望都为 0（否则内存新、磁盘旧）", compatCalls, fbCalls)
+	}
+	// 磁盘：目标路径之下不可能有可读的 config.json。
+	if raw, err := os.ReadFile(filepath.Join(filepath.Dir(a.cfgPath), "config.json")); err == nil && len(raw) > 0 {
+		t.Errorf("落盘失败却留下了文件内容（%d 字节）", len(raw))
+	}
+}
+
+// TestSceneRoutingIdempotentDeepEqual 在 newPanelApp 沙箱内做一次「三场景不变、仅保存」的幂等提交：
+// 前后 a.cfg 与落盘 config.json 的 model_map / model_fallback 必须**深度相等**。
+//
+// 与 TestSceneRoutingIdempotent 的差别：那条比的是**接口返回的两次响应**，这条比的是
+// 「内存 cfg ↔ 磁盘 config.json」两侧，专门守「保存会顺手改动已存值」这类静默漂移。
+// ⚠️ 全程在 t.TempDir() 内，绝不碰运行实例（127.0.0.1:7863 与 Windows 侧 config.json）。
+func TestSceneRoutingIdempotentDeepEqual(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	mux := panelMux(a)
+
+	// 先种一份「已经是目标状态」的配置：直接写一遍，模拟用户此前已保存过。
+	if w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, goodScenes(), nil), nil); w.Code != http.StatusOK {
+		t.Fatalf("种子提交应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	path := a.cfgPath
+	firstDisk := readCfgBytes(t, path)
+	a.mu.Lock()
+	firstMap := map[string]string{}
+	for k, v := range a.cfg.Compat.ModelMap {
+		firstMap[k] = v
+	}
+	firstRules := append([]config.ModelFallbackRule(nil), a.cfg.ModelFallback...)
+	a.mu.Unlock()
+
+	// 再提交**完全相同**的一份（幂等）。
+	if w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, goodScenes(), nil), nil); w.Code != http.StatusOK {
+		t.Fatalf("幂等提交应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	secondDisk := readCfgBytes(t, path)
+	a.mu.Lock()
+	secondMap := map[string]string{}
+	for k, v := range a.cfg.Compat.ModelMap {
+		secondMap[k] = v
+	}
+	secondRules := append([]config.ModelFallbackRule(nil), a.cfg.ModelFallback...)
+	a.mu.Unlock()
+
+	// 磁盘侧：逐字节相等（同样输入 ⇒ 同样文件，说明没有隐藏的随机/时间戳成分）。
+	if string(firstDisk) != string(secondDisk) {
+		t.Errorf("幂等提交后 config.json 逐字节不同（长度 %d → %d）", len(firstDisk), len(secondDisk))
+	}
+	// 内存侧：model_map 深度相等。
+	if !reflect.DeepEqual(firstMap, secondMap) {
+		t.Errorf("model_map 深度不等：\n第一次 %+v\n第二次 %+v", firstMap, secondMap)
+	}
+	// 内存侧：model_fallback 逐条逐项相等（顺序也有语义）。
+	if !reflect.DeepEqual(firstRules, secondRules) {
+		t.Errorf("model_fallback 深度不等：\n第一次 %+v\n第二次 %+v", firstRules, secondRules)
+	}
+	// 两侧交叉：内存与磁盘必须是同一份（否则「面板显示 A、重启后是 B」）。
+	var onDisk config.Config
+	if err := json.Unmarshal(secondDisk, &onDisk); err != nil {
+		t.Fatalf("解析落盘 config: %v", err)
+	}
+	if !reflect.DeepEqual(onDisk.Compat.ModelMap, secondMap) {
+		t.Errorf("磁盘 model_map 与内存不相等：\n磁盘 %+v\n内存 %+v", onDisk.Compat.ModelMap, secondMap)
+	}
+	if !reflect.DeepEqual(onDisk.ModelFallback, secondRules) {
+		t.Errorf("磁盘 model_fallback 与内存不相等：\n磁盘 %+v\n内存 %+v", onDisk.ModelFallback, secondRules)
+	}
+}
+
+// TestSceneRoutingSavesExactlyOnce ① 原子性的本质断言：SetSceneRouting 函数体内
+// `config.Save` 必须**恰好出现一次**。
+//
+// 为什么必须有这条（而它不是"多余的白盒测试"）：把实现改成「先 Save 别名，再 Save 降级链」
+// 之后，所有**行为断言仍然全绿**——因为两次都成功、最终状态正确、dry_run 也正确、
+// 幂等提交也正确（首次变异验证跑的就是这个结果：0 红）。但两次 Save 之间真实存在磁盘中间态，
+// 进程此刻被 kill 就会留下「别名指向一条没有规则的模型」（降级静默失效）。
+// 那种状态无法用「提交后读回来比对」发现，只能在**写盘次数**上守。
+//
+// 判据取「源码里出现次数」而不是「运行时计数」：config.Save 是包级函数、没有注入点，
+// 为测试加一个可替换的 Save 变量等于为了测试改生产结构。函数体是稳定的、可解析的，
+// 且这条不变量（一次事务 = 一次落盘）本来就是结构性的。
+func TestSceneRoutingSavesExactlyOnce(t *testing.T) {
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatalf("读 app.go: %v", err)
+	}
+	body := funcBody(t, string(src), "func (a *App) SetSceneRouting(")
+	if n := strings.Count(body, "config.Save("); n != 1 {
+		t.Errorf("SetSceneRouting 里 config.Save 出现 %d 次，必须恰好 1 次"+
+			"（两次落盘 = 两次之间可被 kill，留下「别名指向无链模型」的中间态）", n)
+	}
+	// 反向护栏：这个函数**不得**再调其它 Set*（会自锁：a.mu 不可重入）。
+	for _, forbidden := range []string{"a.SetCompat(", "a.SetModelFallback(", "a.SetReasoningEfforts("} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("SetSceneRouting 内调用了 %s（a.mu 不可重入，会自锁）", forbidden)
+		}
+	}
+}
+
+// funcBody 粗解析出某个函数声明起到下一个顶层 `func ` 之间的源码片段（含嵌套大括号）。
+// 刻意用「下一个 func 声明」而不是括号配平：Go 源码里函数体内不会有顶层 func 声明，
+// 这个判据足够稳，且比手写括号扫描更不容易出错。找不到声明直接 fail。
+func funcBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		t.Fatalf("找不到函数声明 %q", decl)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest[1:], "\nfunc "); j >= 0 {
+		return rest[:j+1]
+	}
+	return rest
 }

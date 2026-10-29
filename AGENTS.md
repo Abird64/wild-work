@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R126）
+## 1. 决议项索引（R1–R127）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -158,6 +158,7 @@
 | R124 | **`/v1/models` 补 `supported_parameters` 与 `reasoning.mandatory`（合入外部 PR #189，作者 reno；**剔掉了本仓并未实现的 `include_reasoning`**）**（2026-10-22）：出站模型面按**已声明能力**导出 `supported_parameters`（`SupportsTools` ⇒ `tools`/`tool_choice`；有思考档位 ⇒ `reasoning`/`reasoning_effort`），`reasoning.mandatory = !*CanDisableThinking` **且仅在 `CanDisableThinking != nil` 时出现**，两者皆无 ⇒ 整个字段缺席（R49「只透传声明，绝不编造」在模型元数据面的落地）。与 PR 原样的唯一差异：`include_reasoning` 全仓**零处理点**（入站只吃 `reasoning_effort` 与 Responses 的 `reasoning` 对象）⇒ 宣告一个我们不接的参数会让客户端照它发并被静默忽略，故剔除并加护栏断言。决议号按 **R123** 从 PR 自登记的 R122 顺延。详见 [`docs/决议项.md`](docs/决议项.md) R124 |
 | R125 | **自定义渠道新增「鉴权方式」档（Bearer / Basic）：华为云 APIG 系网关只认 `Basic base64(appKey:appSecret)`，写死 Bearer 让这类上游根本进不来**（2026-10-27，用户实测驱动）| 头拼接收口到 `custom.authHeader()` 单一入口（对话与探测不得分叉），`basic` 时 key 填 `app_key:app_secret`；旧配置留空 = bearer 零迁移；`Validate` 与面板两处都拦「basic 缺冒号」。详见 [`docs/决议项.md`](docs/决议项.md) R125 |
 | R126 | **豆包/豆包工作接入每日签到（`/alice/ug/campaign/landing/checkin`，`idempotent` 幂等）**：推翻「本渠道无签到」旧结论；两个渠道都实现 `CheckinReporter`，补 Scheduler（签到开、保活显式关）。详见 [`docs/决议项.md`](docs/决议项.md) R126 |
+| R127 | **三场景路由必须有单一原子写入口：三别名 + 三条链 + compat 三项一次事务落盘，四道跨字段硬校验，其余两层只警告**（2026-10-28~29）：需求是「面板让用户自己选/排序 fast/code/complex 背后的模型与降级链，不再由 AI 硬编码」。**查出的两个真缺陷**：① `fbSanitize` 从每条规则 `To` 里剔除**任意规则**的 `From`（渲染前与保存前各调一次），用现役配置逐字实跑**剔除 4 项**（`code` 丢 `To[0]=raccoon/…`、`complex` 丢 `To[0]=traework/…`）且剩余非空 ⇒ 后端放行 ⇒ **点一次保存即静默落盘**；**跨场景互为备胎是合法设计**（现役那两条互备各有 430/110 次真实请求），不是脏数据。② `SetCompat` 与 `SetModelFallback` **各自整体替换并各写一次全量 config.json**（`config.Save` 只保单文件 tmp+rename 原子）⇒ 「别名指向无链模型 / 链 From 成孤儿」中间态现实可达成，**前端补偿不可行**。**修法四层**：① 前端止血（删 `fbSanitize`、渲染转只读、自环只标注不删数据）；② 服务端 `POST /api/config/scene_routing` 为**唯一写入口**，同一 `a.mu` 内一次 `config.Save`，成功后同函数体连推 `compatSyncer`/`fbSyncer`；③ 硬校验：from/to 含别名拒收（机制层只校「含 `/`」，`workbuddy/fast` 会通过而运行期拆出的 model 永不等于别名 ⇒ 链静默永不触发）、`model_map[alias]≠from` 拒收、别名集合恰为三个、渠道前缀须在已知集合内；**别名判定必须排在「含 `/`」形状判定之前**（别名天然不含斜杠，先判形状会把「写了别名」误报成「格式不对」）；④ `I6` 模型存在性 / `I7` 首备胎同渠道**只警告不阻断**（`warnings[]`；I7 因请求内重入 `skipSameChannel=true` 只跨渠道，同渠道首备胎等于失效）。**前端**：三场景卡片（主模型搜索 + 有序备胎 chips 改序/增删）；**点了就存**但**存前必须先静默复制旧值到剪贴板**（唯一回滚抓手，顺序被断言锁死：反过来剪贴板里就是刚写的新值）；推荐候选**每次展开重算重排**，口径单一来源 `rankCandidates`，**证据等级只做徽标绝不进排序**，四态互斥`FREE`/`PRICED`/`UNPRICED`（`priced=false && free=false` ⇒ **消耗未知，绝不当免费排前**）/`UNAVAILABLE`，`UNPRICED` 以状态分层为第一排序键压在 `PRICED` 之后（否则大池靠额度维挤到实测模型前面），`traework`/`traecode` **按账号池归并**（共用同一 Trae 账号，不归并会让 traecode 判「余额 0」被整渠道排除，而它是 code 场景唯一 1M 上下文入口）。**回归**：`internal/app/scene_routing_test.go` 18 例（含结构断言 `config.Save` 在 `SetSceneRouting` 里**恰好一次**——改成两次 Save 后所有行为断言仍全绿而磁盘中间态真实可达，只能靠写盘次数守；含用「父路径是普通文件」制造必然失败的 Save、断言「返回错误且双 syncer 均未调用」；含幂等提交交叉比对内存 cfg 与落盘文件）+ `ui-static-check` 场景 7/8 共 92 条。**变异验证 5 处全红**（① 分两次 Save 首跑 0 红，补结构断言后才红；② 漏回填 `default_channel`；③ 去别名拒收；④ 去跨字段一致；⑤ 落盘失败仍推 syncer），前端另 21 处（4 处首跑假绿后收紧判据）。**判据层级**：Go 单测 + 静态断言 + **两次真机部署实证**（`/app.js` 与仓内逐字节一致、三别名落点 = 各自 `from`、`config.json` 零漂移）；**响应 `model` 字段回显别名（MS-003 H9），不能作落点判据**，必须看服务端 `sticky route` 行。**已知限制**：只做三个别名；`UNPRICED` 是如实标注而非可解决项；候选池是静态快照不自动扩张；未做独立第三方审核与真实截图（见 SR-004c/SR-006 债务）。详见 [`docs/决议项.md`](docs/决议项.md) R127 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -438,7 +439,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R126 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R127 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
