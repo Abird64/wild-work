@@ -152,6 +152,11 @@ async function refreshFees() {
 // lastFees 最近一次费率接口响应（loadFees/refreshFees 填充）；查找面板读它取全渠道模型。
 let lastFees = null;
 
+// lastStats 最近一次 /api/stats 响应（loadStats 填充）。
+// 为什么留一份而不是每次现拉：三场景推荐排序（rankCandidates）需要 models/platforms 活值，
+// 而 loadStats 已经在轮询；复用同一份就不会出现「面板显示旧统计、推荐用另一份更新」的两套口径。
+let lastStats = null;
+
 // ---------- 三场景推荐排序（SR-005a：纯函数，零 DOM / 零全局态 / 零请求） ----------
 // 规格：SR-008 §二。核心前提是「积分都是免费领的」⇒ 金钱维不进排序；
 // rate 只用于三态识别与同分裁决，不参与主排序（SD-10 已裁）。
@@ -2453,6 +2458,671 @@ async function toggleAutostart() {
   } catch (e) { toast(e.message); loadState(); }
 }
 
+// ---------- 三场景路由编辑器（SR-005b） ----------
+// 一段独立的编辑区，取代「在 textarea 里手写 键 = 渠道/模型 + 另找降级链卡片对齐」的旧形态。
+// 设计约束（全部来自裁决，改代码前先读）：
+//   SD-1「点了就存」⇒ 无 diff 预览、无二次确认；但保存前**必须**静默复制旧值（唯一回滚抓手，R-3）。
+//   SD-6 ⇒ 唯一写入口 `POST /api/config/scene_routing`（一次 config.Save，无中间态）。
+//   SD-7 ⇒ 每次打开重算重排；这里只管编辑，推荐列表在 SR-005c。
+//   SD-9 ⇒ 别名固定三个，不接受第四个。
+//   SD-4 ⇒ 同主模型/自环/别名等非法形态**当场拦下 + 大白话**（服务端也拦，这里是先手）。
+// 编辑态 sceneRules 与 state.compat.model_map / state.model_fallback 的关系：
+//   **唯一真相源是服务端**。openSettings 时从 state 深拷贝生成编辑态；保存成功后用服务端
+//   返回值覆盖（不信前端算的），保证「面板显示 A、运行时用 B」不可能发生（A-3）。
+
+// SCENE_ALIASES 场景别名与中文名的单一来源（SD-9：只做三个）。
+// 顺序即 UI 展示顺序，也是提交时的固定顺序（服务端按 sceneAliases 固定顺序生成，幂等）。
+const SCENE_ALIASES = [
+  { alias: "fast",    label: "快速", desc: "低延迟优先：日常问答、轻量改写" },
+  { alias: "code",    label: "代码", desc: "工具调用是硬条件：需要 tools 能力 + 足够上下文" },
+  { alias: "complex", label: "复杂", desc: "深度推理与长上下文优先：方案、长文分析" },
+];
+
+// SCENE_CANDIDATES 推荐候选池（来源 = SR-002 的 scene-candidates.json）。
+// ⚠️ 这里只搬 id 与证据等级：**活值（倍率/余额/实测速度）一律现取 lastFees/stats**，
+//    绝不把快照数字当现值用（否则「推荐」会拿着过期数据排序）。
+// 复制而非 fetch 静态资源：本项目无构建链（TP 非目标 4），加一次 fetch 就多一个部署面。
+const SCENE_CANDIDATES = {
+ "_meta": {
+  "source": "SR-002 scene-candidates.json",
+  "sampled_at": "2026-10-27"
+ },
+ "scenes": [
+  {
+   "alias": "fast",
+   "candidates": [
+    {
+     "id": "traework/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "workbuddy/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "qodercn/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "workbuddy/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "kilo/cohere/north-mini-code:free",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "unverified"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/mimo-v2.6-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    }
+   ]
+  },
+  {
+   "alias": "code",
+   "candidates": [
+    {
+     "id": "workbuddy/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "raccoon/sn-deepseek-v4-1-flash-1017",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "workbuddy/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "qwenwork/flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "unverified"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/mimo-v2.6-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    }
+   ]
+  },
+  {
+   "alias": "complex",
+   "candidates": [
+    {
+     "id": "raccoon/sn-deepseek-v4-1-flash-1017",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "workbuddy/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "local-measured",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "workbuddy/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": true
+    },
+    {
+     "id": "qodercn/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "upstream-declared",
+      "context": "unverified"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/deepseek-v4.1-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/glm-5.3-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    },
+    {
+     "id": "traecode/mimo-v2.6-flash",
+     "report_evidence": {
+      "rate": "upstream-declared",
+      "speed": "unverified",
+      "capability": "local-measured",
+      "context": "upstream-declared"
+     },
+     "routed_out": false
+    }
+   ]
+  }
+ ]
+};
+
+// 编辑态：{ [alias]: { from, to: [] } }。不进 state，避免污染服务端数据。
+let sceneRules = {};
+
+// sceneNormalize 把服务端两份数据合成编辑态：model_map 提供 from，model_fallback 按 From 对齐提供 to。
+// 找不到对应规则 = 该别名指向一个没有降级链的模型（真实可能的坏状态），to 记空数组让用户看见并补。
+function sceneNormalize(compat, fallback) {
+  const map = (compat && compat.model_map) || {};
+  const rules = fallback || [];
+  const out = {};
+  for (const { alias } of SCENE_ALIASES) {
+    const from = String(map[alias] || "").trim();
+    const hit = rules.find((r) => String(r.from || "").trim() === from);
+    out[alias] = { from, to: hit ? (hit.to || []).map((t) => String(t).trim()).filter(Boolean) : [] };
+  }
+  return out;
+}
+
+// sceneProblems 本地预检：返回 [{ alias, level: "error"|"warn", msg }]。
+// 只做**结构**判断（服务端才是判据权威）；能本地拦的先拦，省一次往返、也让错误留在眼前。
+// 唯一硬错误：自环（备胎 = 本链主模型）、主模型为空/形状不对、别名混进 from/to、主模型跨场景重复。
+function sceneProblems(rules) {
+  const out = [];
+  const seenFrom = {};
+  for (const { alias, label } of SCENE_ALIASES) {
+    const r = rules[alias] || { from: "", to: [] };
+    const from = String(r.from || "").trim();
+    if (!from) {
+      out.push({ alias, level: "error", msg: "主模型不能为空" });
+    } else if (SCENE_ALIASES.some((x) => x.alias === from)) {
+      // 别名判定**必须**排在形状判定之前：别名天然不含 `/`，先判形状会把
+      // 「你写了别名」误报成「格式不对」，用户照着格式提示改还是错。
+      out.push({ alias, level: "error", msg: `主模型不能写成别名 ${from}——要写 渠道/模型 全路径（写别名会让整条链永不触发且不报错）` });
+    } else if (!/^[^/]+\/.+/.test(from)) {
+      out.push({ alias, level: "error", msg: `主模型 ${from} 需为 渠道/模型 形式（如 traework/deepseek-v4.1-flash）` });
+    } else {
+      if (seenFrom[from]) {
+        out.push({ alias, level: "error", msg: `主模型 ${from} 与「${seenFrom[from]}」重复——两个场景共用一个主模型时，降级链只会有一条生效` });
+      } else {
+        seenFrom[from] = label;
+      }
+    }
+    for (const t of r.to || []) {
+      const tv = String(t || "").trim();
+      if (!tv) continue;
+      if (tv === from) {
+        out.push({ alias, level: "error", msg: `备胎不能是它自己的主模型（自环）：${tv}` });
+      } else if (SCENE_ALIASES.some((x) => x.alias === tv)) {
+        out.push({ alias, level: "error", msg: `备胎不能写成别名 ${tv}——要写 渠道/模型 全路径` });
+      } else if (!/^[^/]+\/.+/.test(tv)) {
+        out.push({ alias, level: "error", msg: `备胎 ${tv} 需为 渠道/模型 形式` });
+      }
+    }
+    if ((r.to || []).length === 0) {
+      out.push({ alias, level: "warn", msg: "备胎链为空——主模型无容量时这条链不会降级（请求会直接失败）" });
+    }
+  }
+  // 互备是合法的（SD-3），这里只做**信息性**说明，不是错误。
+  for (const { alias, label } of SCENE_ALIASES) {
+    const r = rules[alias] || { to: [] };
+    for (const other of SCENE_ALIASES) {
+      if (other.alias === alias) continue;
+      const otherFrom = String((rules[other.alias] || {}).from || "").trim();
+      if (otherFrom && (r.to || []).includes(otherFrom)) {
+        out.push({ alias, level: "info", msg: `备胎里含「${other.label}」的主模型 ${otherFrom}——互为备胎是合法的，无需处理` });
+      }
+    }
+  }
+  return out;
+}
+
+// scenePayload 生成提交体：三场景按固定顺序 + 回填 default_channel / max_tokens_cap。
+// **必须回填**这两项：端点内部会整体写 compat 的这三项，漏传等于把默认渠道和封顶清零（R-4）。
+function scenePayload(extra) {
+  const cc = (state && state.compat) || {};
+  const body = {
+    scenes: SCENE_ALIASES.map(({ alias }) => {
+      const r = sceneRules[alias] || { from: "", to: [] };
+      return { alias, from: String(r.from || "").trim(), to: (r.to || []).map((t) => String(t).trim()).filter(Boolean) };
+    }),
+    default_channel: cc.default_channel || "",
+    max_tokens_cap: cc.max_tokens_cap || 0,
+  };
+  return Object.assign(body, extra || {});
+}
+
+// sceneConfigText 生成「复制当前配置」与「保存前自动备份」共用的文本（同一份，避免两处漂移）。
+// 格式刻意用可直接回粘的结构（JSON）+ 一行人类可读摘要：纯 JSON 手改容易，纯文本手改更容易但改不回 JSON。
+function sceneConfigText() {
+  const cc = (state && state.compat) || {};
+  const map = cc.model_map || {};
+  const rules = (state.model_fallback || []).filter((r) => SCENE_ALIASES.some((x) => map[x.alias] === r.from));
+  return JSON.stringify({ model_map: map, model_fallback: rules }, null, 2);
+}
+
+// sceneBackup 保存前静默把旧值写进剪贴板（SD-1 的唯一缓解措施，R-3：不得省）。
+// 返回 true/false 供 toast 文案区分——剪贴板在非 https 下可能被拒，那就明说，不假装成功。
+async function sceneBackup() {
+  const text = sceneConfigText();
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (err) { return false; }
+  }
+}
+
+// sceneSetFrom 改某场景的主模型（附「主模型跨场景唯一」的即时反馈）。
+function sceneSetFrom(alias, id) {
+  if (!sceneRules[alias]) return;
+  const v = String(id || "").trim();
+  if (!v) return;
+  // 改主模型不会顺手删数据：若 v 已在本链备胎里，改完即自环 ⇒ 拒绝并说明（与 SR-003 同口径）。
+  if ((sceneRules[alias].to || []).includes(v)) {
+    $("sceneErr").textContent = `主模型不能改成 ${v}：它已在「${SCENE_ALIASES.find((x) => x.alias === alias).label}」的备胎链上（会变成自环），请先移除该备胎`;
+    return;
+  }
+  sceneRules[alias].from = v;
+  renderSceneCards();
+}
+
+// sceneAddTo 追加一个备胎（只拦自环与重复——跨场景互备是合法的，SD-3）。
+function sceneAddTo(alias, id) {
+  const r = sceneRules[alias];
+  if (!r) return;
+  const v = String(id || "").trim();
+  if (!v) return;
+  if (v === r.from) { $("sceneErr").textContent = "备胎不能是它自己的主模型（自环）"; return; }
+  if ((r.to || []).includes(v)) { $("sceneErr").textContent = `备胎 ${v} 已在该链上（无需重复添加）`; return; }
+  r.to.push(v);
+  renderSceneCards();
+}
+
+// sceneMoveTo 调整备胎顺序（序号 = 降级优先级）。up=true 上移一位。
+function sceneMoveTo(alias, idx, delta) {
+  const r = sceneRules[alias];
+  if (!r) return;
+  const j = idx + delta;
+  if (j < 0 || j >= r.to.length) return;
+  const [moved] = r.to.splice(idx, 1);
+  r.to.splice(j, 0, moved);
+  renderSceneCards();
+}
+
+// sceneDelTo 移除一个备胎。
+function sceneDelTo(alias, idx) {
+  const r = sceneRules[alias];
+  if (!r || idx < 0 || idx >= r.to.length) return;
+  r.to.splice(idx, 1);
+  renderSceneCards();
+}
+
+// sceneSummary 一个场景的「当前指向」单行摘要（供卡片头部与原始视图对照）。
+function sceneSummary(r) {
+  const to = (r && r.to) || [];
+  return `${(r && r.from) || "（未设置）"} → ${to.length ? to.join(" → ") : "（无备胎）"}`;
+}
+
+// renderSceneCards 渲染三张场景卡片。
+// 交互走事件委托（#sceneCards 上），因此每轮 innerHTML 重建无需重挂监听。
+// 行为：主模型行 = 可搜索单选 input（attachModelPicker）+ 备胎 chips（上移/下移/移除）+ 追加行。
+function renderSceneCards() {
+  const box = $("sceneCards");
+  if (!box) return;
+  const probs = sceneProblems(sceneRules);
+  const byAlias = {};
+  for (const p of probs) (byAlias[p.alias] ||= []).push(p);
+
+  box.innerHTML = SCENE_ALIASES.map(({ alias, label, desc }) => {
+    const r = sceneRules[alias] || { from: "", to: [] };
+    const mine = byAlias[alias] || [];
+    const errs = mine.filter((p) => p.level === "error");
+    const tos = (r.to || []).map((t, j) => `
+      <span class="fb-to-chip" data-scene-chip="${alias}:${j}" data-model="${esc(t)}" title="${esc(t)}（序号 = 降级优先级）">
+        <span class="chip-idx">${j + 1}</span>
+        <a data-scene-up="${alias}:${j}" title="上移一位（更优先）"${j === 0 ? ' class="is-off"' : ""}>↑</a>
+        <a data-scene-down="${alias}:${j}" title="下移一位"${j === r.to.length - 1 ? ' class="is-off"' : ""}>↓</a>
+        <span class="chip-txt">${esc(t)}</span>
+        <a data-scene-del="${alias}:${j}" title="移除该备胎">×</a>
+      </span>`).join("");
+    const notes = mine.filter((p) => p.level !== "error")
+      .map((p) => `<div class="hint" style="color:${p.level === "warn" ? "var(--warn)" : "var(--muted)"};margin-top:2px">${p.level === "warn" ? "⚠ " : "· "}${esc(p.msg)}</div>`).join("");
+    const errHtml = errs.length
+      ? `<div class="hint" style="color:var(--danger);margin-top:4px">${errs.map((p) => esc(p.msg)).join("；")}</div>` : "";
+    return `<div class="fb-rule-card scene-card" data-scene="${alias}"${errs.length ? ' data-invalid="1"' : ""}>
+      <div class="fb-rule-head">
+        <span class="fb-rule-badge">${esc(alias)}</span>
+        <span class="scene-label">${esc(label)}</span>
+        <span class="hint" style="margin:0">${esc(desc)}</span>
+      </div>
+      <div class="fb-rule-body">
+        <div class="row" style="margin-top:0">
+          <label class="lbl scene-lbl">主模型</label>
+          <span class="pk-wrap grow"><input class="input scene-from" data-scene-from="${alias}" value="${esc(r.from)}" spellcheck="false" placeholder="渠道/模型（支持模糊搜索下拉）"></span>
+        </div>
+        <div class="row" style="margin-top:4px;align-items:flex-start">
+          <label class="lbl scene-lbl" style="margin-top:4px">备胎链</label>
+          <div class="grow">
+            <div class="fb-chips">${tos || '<span class="hint">（无备胎）</span>'}</div>
+            <span class="pk-wrap" style="margin-top:4px;display:block"><input class="input scene-to-add" data-scene-add="${alias}" spellcheck="false" placeholder="＋ 追加备胎（模糊搜索 / 回车添加 / 逗号分隔多个）"></span>
+          </div>
+        </div>
+        ${errHtml}${notes}
+        <div class="hint scene-sum" style="margin-top:4px">降级顺序：${esc(sceneSummary(r))}</div>
+      </div>
+    </div>`;
+  }).join("");
+
+  attachScenePickers();
+  renderSceneWarn();
+}
+
+// renderSceneWarn 汇总展示所有场景的非字段级提醒（互备信息 + 空链警告）。
+function renderSceneWarn() {
+  const el = $("sceneWarn");
+  if (!el) return;
+  const probs = sceneProblems(sceneRules);
+  const infos = probs.filter((p) => p.level !== "error").map((p) => {
+    const lab = SCENE_ALIASES.find((x) => x.alias === p.alias).label;
+    return `${lab}：${p.msg}`;
+  });
+  el.textContent = infos.length ? infos.join("　|　") : "";
+}
+
+// attachScenePickers 给卡片里的输入框挂模糊搜索下拉（每轮 innerHTML 重建后重挂）。
+// 主模型：单选（选中即回填并重渲染）。备胎追加：多选（点选即追加到链末）。
+function attachScenePickers() {
+  const box = $("sceneCards");
+  if (!box) return;
+  for (const inp of box.querySelectorAll(".scene-from")) {
+    const alias = inp.dataset.sceneFrom;
+    attachModelPicker(inp, {
+      // 排除「其它场景的主模型」只是去噪提示，不阻止选择（同主模型由 sceneProblems 拦）。
+      excludeSet: () => {
+        const s = {};
+        for (const { alias: a } of SCENE_ALIASES) {
+          const f = String((sceneRules[a] || {}).from || "").trim();
+          if (f && a !== alias) s[f] = true;
+        }
+        return s;
+      },
+      onPick: (id) => sceneSetFrom(alias, id),
+    });
+  }
+  for (const inp of box.querySelectorAll(".scene-to-add")) {
+    const alias = inp.dataset.sceneAdd;
+    attachModelPicker(inp, {
+      stayOpen: true,
+      excludeSet: () => {
+        const r = sceneRules[alias] || { from: "", to: [] };
+        const s = { [r.from]: true };
+        for (const t of r.to || []) s[t] = true;
+        return s;
+      },
+      onPick: (id) => sceneAddTo(alias, id),
+    });
+  }
+}
+
+// parseSceneModelList 解析备胎追加输入（逗号/空格/换行分隔）。
+function parseSceneModelList(raw) {
+  const out = [];
+  for (const p of String(raw || "").split(/[,，\s]+/)) {
+    const t = p.trim();
+    if (!t) continue;
+    if (!/^[^/]+\/.+/.test(t)) return [null, `备胎 ${t} 需为 渠道/模型 形式（如 traework/deepseek-v4.1-flash）`];
+    out.push(t);
+  }
+  return [out, ""];
+}
+
+// sceneDryRun 点「预检」：调端点 dry_run=true，只校验 + 回提醒，不写盘。
+async function sceneDryRun() {
+  const local = sceneProblems(sceneRules).filter((p) => p.level === "error");
+  if (local.length) {
+    $("sceneErr").textContent = local.map((p) => p.msg).join("；");
+    return;
+  }
+  $("sceneErr").textContent = "";
+  $("btnSceneDryRun").disabled = true;
+  try {
+    const res = await api("/api/config/scene_routing", scenePayload({ dry_run: true }));
+    showSceneServerWarn(res);
+    toast("预检通过（未写盘）");
+  } catch (e) {
+    $("sceneErr").textContent = e.message;
+  } finally {
+    $("btnSceneDryRun").disabled = false;
+  }
+}
+
+// showSceneServerWarn 展示服务端 raw warnings（I6 目录里查不到 / I7 首选备胎同渠道）。
+function showSceneServerWarn(res) {
+  const ws = (res && res.warnings) || [];
+  $("sceneWarn").textContent = ws.length ? `服务端提醒：${ws.join("　|　")}` : "";
+}
+
+// saveSceneRouting 点「保存三场景」：本地预检 → **静默复制旧值** → 原子写 → 回读校验。
+// 顺序不能反：备份必须在**发出写请求之前**完成。若等请求回来再备份，服务端已经是新值，
+// 剪贴板里就是新值，等于没有备份（R-3 想防的正是这个）。
+async function saveSceneRouting() {
+  const local = sceneProblems(sceneRules).filter((p) => p.level === "error");
+  if (local.length) {
+    const msg = local.map((p) => p.msg).join("；");
+    $("sceneErr").textContent = msg;
+    toast(msg);
+    return;
+  }
+  $("sceneErr").textContent = "";
+  const btn = $("btnSceneSave");
+  btn.disabled = true;
+  let backedUp = false;
+  try {
+    backedUp = await sceneBackup();
+    const res = await api("/api/config/scene_routing", scenePayload());
+    // 用服务端返回值覆盖编辑态与基准（不信前端算的，A-3）
+    if (res && res.model_map) {
+      state.compat = state.compat || {};
+      state.compat.model_map = res.model_map;
+      state.compat.default_channel = res.default_channel;
+      state.compat.max_tokens_cap = res.max_tokens_cap;
+    }
+    if (res && res.model_fallback) state.model_fallback = res.model_fallback;
+    sceneRules = sceneNormalize(state.compat, state.model_fallback);
+    renderSceneCards();
+    showSceneServerWarn(res);
+    // 回读校验：服务端口径才是真相，比对三别名指向与服务端返回值是否一致。
+    const mismatch = verifySceneReadback(res);
+    if (mismatch) {
+      $("sceneErr").textContent = `已保存，但回读不一致：${mismatch}`;
+      toast("已保存但回读不一致，请检查");
+    } else {
+      toast(backedUp ? "三场景已保存（旧值已复制到剪贴板）" : "三场景已保存（⚠ 旧值复制失败，请手动备份）");
+    }
+    loadState(); // 让面板其它区域（compat 摘要、降级链列表）同步到新值
+  } catch (e) {
+    $("sceneErr").textContent = e.message;
+    toast(backedUp ? `保存失败：${e.message}（旧值已在剪贴板）` : `保存失败：${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// verifySceneReadback 比对「提交的期望值」与「服务端返回的实际值」，不一致返回差异描述（空串=一致）。
+function verifySceneReadback(res) {
+  if (!res || !res.model_map) return "";
+  const diff = [];
+  for (const { alias } of SCENE_ALIASES) {
+    const want = String((sceneRules[alias] || {}).from || "").trim();
+    const got = String(res.model_map[alias] || "").trim();
+    if (want && got !== want) diff.push(`${alias} 期望 ${want}，服务端为 ${got || "（空）"}`);
+  }
+  return diff.join("；");
+}
+
+// openSceneEditor 打开设置时初始化编辑态。
+// **必须 await 取数**（SD-7 连带约束 1 / R-3b）：推荐列表要用活的 lastFees/stats，
+// 拿上一次缓存冒充新数据会让「重算重排」变成假动作。这里只管编辑区，
+// 但取数放在同一处，SR-005c 的列表直接复用这份数据，不会各拉一遍。
+async function openSceneEditor() {
+  sceneRules = sceneNormalize(state && state.compat, state && state.model_fallback);
+  renderSceneCards();
+  $("sceneErr").textContent = "";
+  // 费率与统计：只有缺的时候才拉（已有则不重复打接口）；下载失败不阻塞编辑区。
+  if (!lastFees) { try { await loadFees(); } catch (e) { /* 不阻塞 */ } }
+  if (!lastStats) { try { await loadStats(); } catch (e) { /* 不阻塞 */ } }
+}
+
 // ---------- 模型降级链（设置弹层：原模型无可用账号时按链顶备胎，不粘滞自动切回） ----------
 // fbRules 编辑态副本（openSettings 时从 state.model_fallback 深拷贝；保存成功后由 loadState 刷新）
 let fbRules = [];
@@ -2847,7 +3517,7 @@ function syncListenRisk() {
   $("adminPassReq").classList.toggle("hidden", !needPass);
 }
 
-function openSettings() {
+async function openSettings() {
   // 弹层互斥：打开设置时收起「查找模型」（#134）
   $("modelSearchOverlay").classList.add("hidden");
   // 监听
@@ -2903,6 +3573,9 @@ function openSettings() {
   $("chkBodyLog").checked = !!state.body_log;
   syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
   $("settingsOverlay").classList.remove("hidden");
+  // 三场景编辑区（SR-005b）：先渲染（立刻可见），再 await 取活值（推荐列表要用新数据，SD-7）。
+  // 顺序是「先可见后补齐」而不是反过来——费率接口慢时不该让整个设置弹层等它。
+  await openSceneEditor();
 }
 
 function closeSettings() {
@@ -3737,6 +4410,40 @@ function bind() {
   // 统一设置弹层
   $("btnSettingsSave").onclick = saveSettings;
   $("btnSettingsCancel").onclick = closeSettings;
+  // 三场景路由（SR-005b）：复制当前配置 / 预检（dry_run，不写盘）/ 保存（存前静默复制旧值）
+  $("btnSceneCopy").onclick = () => copyText(sceneConfigText(), "当前三场景配置");
+  $("btnSceneDryRun").onclick = sceneDryRun;
+  $("btnSceneSave").onclick = saveSceneRouting;
+  // 卡片内交互全部委托在 #sceneCards 上（每轮 innerHTML 重建后委托仍有效）：
+  // 主模型输入框 change = 确认回填；备胎 ↑↓ 改序、× 移除；追加框回车 = 追加。
+  $("sceneCards").addEventListener("change", (e) => {
+    if (!e.target.classList.contains("scene-from")) return;
+    const alias = e.target.dataset.sceneFrom;
+    const v = String(e.target.value || "").trim();
+    const cur = String((sceneRules[alias] || {}).from || "");
+    if (!v || v === cur) { e.target.value = cur; return; }
+    // 失败时重渲染会把输入框刷回原值（错误文案留在 #sceneErr 里，不静默吞掉）
+    sceneSetFrom(alias, v);
+  });
+  $("sceneCards").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    if (!e.target.classList.contains("scene-to-add")) return;
+    const alias = e.target.dataset.sceneAdd;
+    const [tos, err] = parseSceneModelList(e.target.value);
+    if (err) { $("sceneErr").textContent = err; return; }
+    if (tos.length === 0) return;
+    const before = (sceneRules[alias].to || []).length;
+    for (const t of tos) sceneAddTo(alias, t);
+    if ((sceneRules[alias].to || []).length > before) $("sceneErr").textContent = "";
+  });
+  $("sceneCards").addEventListener("click", (e) => {
+    const up = e.target.closest("[data-scene-up]");
+    if (up) { const [a, j] = up.dataset.sceneUp.split(":"); sceneMoveTo(a, +j, -1); return; }
+    const down = e.target.closest("[data-scene-down]");
+    if (down) { const [a, j] = down.dataset.sceneDown.split(":"); sceneMoveTo(a, +j, 1); return; }
+    const del = e.target.closest("[data-scene-del]");
+    if (del) { const [a, j] = del.dataset.sceneDel.split(":"); sceneDelTo(a, +j); return; }
+  });
   $("btnCompatMap").onclick = toggleMapEditor;
   $("selHost").onchange = () => {
     $("customHostRow").classList.toggle("hidden", $("selHost").value !== "__custom__");
@@ -4488,6 +5195,7 @@ async function loadStats() {
       api("/api/stats"),
       api(STATS_LOGS_URL).catch(() => null), // 失败保旧：跳过本轮渲染，不清空已渲染的请求日志
     ]);
+    lastStats = s; // 供三场景推荐排序取 models/platforms 活值（与面板同源，不另拉一份）
     renderStats(s);
     renderAbnormal(s.abnormal || []);
     renderFallbacks(s.fallbacks || []);

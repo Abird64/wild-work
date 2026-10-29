@@ -207,6 +207,22 @@ const patched =
   + ', fbSelfLoops: typeof fbSelfLoops === "function" ? fbSelfLoops : () => null'
   + ', fbSaveGuard: typeof fbSaveGuard === "function" ? fbSaveGuard : () => null'
   + ', fbSavePayload: typeof fbSavePayload === "function" ? fbSavePayload : () => null'
+  // 三场景路由编辑器（SR-005b）：sceneRules / state 都是可变 `let`，只能靠源码作用域注入器读写。
+  // 同样用 typeof 兜底，让「改动前」的新断言逐条变红而不是 ReferenceError 崩掉整份检查。
+  + ", SCENE_ALIASES, SCENE_CANDIDATES"
+  + ", __setSceneRules: (r) => { sceneRules = JSON.parse(JSON.stringify(r)); }"
+  + ", __getSceneRules: () => JSON.parse(JSON.stringify(sceneRules))"
+  + ", __setState: (s) => { state = s; }"
+  + ', sceneNormalize: typeof sceneNormalize === "function" ? sceneNormalize : () => null'
+  + ', sceneProblems: typeof sceneProblems === "function" ? sceneProblems : () => []'
+  + ', scenePayload: typeof scenePayload === "function" ? scenePayload : () => null'
+  + ', sceneConfigText: typeof sceneConfigText === "function" ? sceneConfigText : () => ""'
+  + ', renderSceneCards: typeof renderSceneCards === "function" ? renderSceneCards : () => {}'
+  + ', sceneSetFrom: typeof sceneSetFrom === "function" ? sceneSetFrom : () => {}'
+  + ', sceneAddTo: typeof sceneAddTo === "function" ? sceneAddTo : () => {}'
+  + ', sceneMoveTo: typeof sceneMoveTo === "function" ? sceneMoveTo : () => {}'
+  + ', sceneDelTo: typeof sceneDelTo === "function" ? sceneDelTo : () => {}'
+  + ', verifySceneReadback: typeof verifySceneReadback === "function" ? verifySceneReadback : () => ""'
   + " };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
@@ -806,6 +822,217 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     }));
 }
 
+// ---- 场景 7：三场景路由编辑器（SR-005b）----
+// 验收要点（SR-005 卡）：三场景卡片渲染、字段齐全、非法输入四类文案、回填字段、
+// 保存前旧值复制、回读不一致报错。全部为纯函数/字符串级断言——ui-static-check 不跑浏览器。
+{
+  // 造一份与服务端同形的输入：model_map 三键 + model_fallback 三条规则（含互为备胎）
+  const compat = {
+    default_channel: "qwenwork", max_tokens_cap: 32000,
+    model_map: {
+      fast: "qwenwork/flash",
+      code: "traework/deepseek-v4.1-flash",
+      complex: "raccoon/sn-deepseek-v4-1-flash-1017",
+    },
+  };
+  const fallback = [
+    { from: "qwenwork/flash", to: ["traecode/deepseek-v4.1-flash", "qodercn/glm-5.3-flash"] },
+    { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
+    { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] },
+  ];
+
+  // ① 归一：model_map 给 from、model_fallback 按 From 对齐给 to
+  T.__setSceneRules(T.sceneNormalize(compat, fallback));
+  let rs = T.__getSceneRules();
+  check("SR-005b：归一后三别名齐备且顺序固定 fast/code/complex",
+    JSON.stringify(Object.keys(rs)) === JSON.stringify(["fast", "code", "complex"]),
+    JSON.stringify(Object.keys(rs)));
+  check("SR-005b：fast.from 取自 model_map", rs.fast.from === "qwenwork/flash", rs.fast.from);
+  check("SR-005b：fast.to 沿用降级链原序（未被重排/未被清洗）",
+    JSON.stringify(rs.fast.to) === JSON.stringify(["traecode/deepseek-v4.1-flash", "qodercn/glm-5.3-flash"]),
+    JSON.stringify(rs.fast.to));
+  check("SR-005b：complex.to 保留与 code 的互为备胎（SD-3 合法，不得剔）",
+    rs.complex.to.includes("traework/deepseek-v4.1-flash"), JSON.stringify(rs.complex.to));
+  check("SR-005b：model_map 有别名但缺规则时 to 记空数组（不静默消失）",
+    (() => { const r = T.sceneNormalize({ model_map: { fast: "x/y" } }, []); return JSON.stringify(r.fast.to) === "[]"; })());
+
+  // ② 渲染：三张卡片 + 字段齐全（别名徽标、中文名、主模型 input、备胎 chips、追加框、降级顺序）
+  T.renderSceneCards();
+  const html = document.getElementById("sceneCards").innerHTML;
+  check("SR-005b：渲染出三张场景卡片", (html.match(/data-scene="/g) || []).length === 3,
+    String((html.match(/data-scene="/g) || []).length));
+  check("SR-005b：三别名徽标齐备", ["fast", "code", "complex"].every((a) => html.includes(`>${a}</span>`)));
+  check("SR-005b：三场景中文名齐备", ["快速", "代码", "复杂"].every((l) => html.includes(l)));
+  check("SR-005b：每张卡片都有主模型输入框", (html.match(/class="input scene-from"/g) || []).length === 3);
+  check("SR-005b：主模型输入框带 data-scene-from（事件委托靠它定位）",
+    (html.match(/data-scene-from="/g) || []).length === 3);
+  check("SR-005b：备胎 chip 带序号 1/2", html.includes('class="chip-idx">1</span>') && html.includes('class="chip-idx">2</span>'));
+  check("SR-005b：备胎 chip 有上移/下移/移除三个操作", html.includes("data-scene-up=") && html.includes("data-scene-down=") && html.includes("data-scene-del="));
+  check("SR-005b：每张卡片都有追加备胎输入框", (html.match(/class="input scene-to-add"/g) || []).length === 3);
+  check("SR-005b：卡片尾部显示降级顺序摘要（原模型 → 备胎 → …）", /降级顺序：qwenwork\/flash → traecode/.test(html));
+  check("SR-005b：首位的上移按钮置灰（is-off）、末位的下移置灰",
+    /data-scene-up="fast:0" title="上移一位（更优先）" class="is-off"/.test(html)
+    && /data-scene-down="fast:1" title="下移一位" class="is-off"/.test(html));
+  check("SR-005b：互备提示是 info 级（不判错，SD-3）",
+    /互为备胎是合法的/.test(html) && !/data-invalid="1"/.test(html));
+
+  // ③ 非法输入四类（卡上验收项）：自环 / 别名进 from / 别名进 to / 两场景同主模型
+  const mk = (m) => T.sceneProblems(T.sceneNormalize({ model_map: m.map, default_channel: "x", max_tokens_cap: 1 }, m.fb));
+  const loopP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
+                     fb: [{ from: "a/m", to: ["a/m"] }, { from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法①：自环（备胎=自己主模型）被拦，文案含「自环」",
+    loopP.some((m) => m.includes("自环")), loopP.join("|"));
+  const aliasFromP = mk({ map: { fast: "fast", code: "b/m", complex: "c/m" },
+                          fb: [{ from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法②：主模型写成别名被拦，文案说明「整条链永不触发」",
+    aliasFromP.some((m) => m.includes("不能写成别名") && m.includes("永不触发")), aliasFromP.join("|"));
+  const aliasToP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
+                        fb: [{ from: "a/m", to: ["code"] }, { from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法③：备胎写成别名被拦",
+    aliasToP.some((m) => m.includes("备胎不能写成别名")), aliasToP.join("|"));
+  const dupP = mk({ map: { fast: "a/m", code: "a/m", complex: "c/m" },
+                    fb: [{ from: "a/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法④：两场景共用主模型被拦，文案说明「只会有一条生效」",
+    dupP.some((m) => m.includes("重复") && m.includes("只会有一条生效")), dupP.join("|"));
+  // 空备胎链是**警告不是错误**（拦它会让用户没法先配主模型）
+  const emptyP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
+                      fb: [{ from: "a/m", to: [] }] }).filter((p) => p.alias === "fast");
+  check("SR-005b：空备胎链只给 warn（不阻断保存）",
+    emptyP.some((p) => p.level === "warn") && !emptyP.some((p) => p.level === "error"),
+    JSON.stringify(emptyP));
+
+  // ④ 提交载荷必须回填 default_channel / max_tokens_cap（R-4 整体替换陷阱）
+  T.sceneNormalize(compat, fallback);
+  T.__setState({ compat: { default_channel: "qwenwork", max_tokens_cap: 32000, model_map: compat.model_map },
+                 model_fallback: fallback });
+  T.__setSceneRules(T.sceneNormalize(compat, fallback));
+  const payload = T.scenePayload();
+  check("SR-005b：提交载荷回填 default_channel（漏传会把默认渠道清零）",
+    payload.default_channel === "qwenwork", payload.default_channel);
+  check("SR-005b：提交载荷回填 max_tokens_cap", payload.max_tokens_cap === 32000, String(payload.max_tokens_cap));
+  check("SR-005b：提交载荷按固定顺序 fast/code/complex", JSON.stringify(payload.scenes.map((x) => x.alias)) === JSON.stringify(["fast", "code", "complex"]));
+  check("SR-005b：提交载荷三项齐（alias/from/to）",
+    payload.scenes.every((x) => typeof x.alias === "string" && typeof x.from === "string" && Array.isArray(x.to)));
+  check("SR-005b：dry_run 附加字段不污染正常载荷",
+    payload.dry_run === undefined && T.scenePayload({ dry_run: true }).dry_run === true);
+
+  // ⑤ 保存前旧值复制（SD-1 的唯一回滚抓手，R-3 不得省）
+  const cfgText = T.sceneConfigText();
+  check("SR-005b：备份文本含 model_map 三别名", ["fast", "code", "complex"].every((a) => cfgText.includes(`"${a}"`)));
+  check("SR-005b：备份文本含三条降级链的 from", fallback.every((r) => cfgText.includes(r.from)));
+  check("SR-005b：备份文本是合法 JSON（可直接回粘）", (() => { try { JSON.parse(cfgText); return true; } catch (e) { return false; } })());
+  // ⚠️ 顺序断言：备份必须发生在写请求**之前**。若反过来（先写后备份），
+  // 剪贴板里装的就是服务端刚写的新值——等于没有备份，R-3 想防的正是这个。
+  {
+    const saveBody = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
+    const iBk = saveBody.indexOf("await sceneBackup()");
+    const iSave = saveBody.indexOf("/api/config/scene_routing");
+    check("SR-005b：保存前静默复制旧值（SD-1 / R-3，不得省）", iBk > 0, `sceneBackup 调用位置 ${iBk}`);
+    check("SR-005b：备份发生在写请求之前（先备份后提交，顺序不得反）",
+      iBk > 0 && iSave > 0 && iBk < iSave, `备份@${iBk} 提交@${iSave}`);
+  }
+  check("SR-005b：备份文本只含三场景规则（不夹带其它自建规则）",
+    (() => {
+      T.__setState({ compat: { model_map: compat.model_map, default_channel: "qwenwork", max_tokens_cap: 1 },
+        model_fallback: fallback.concat([{ from: "zzz/custom", to: ["q/1"] }]) });
+      const t = T.sceneConfigText();
+      return !t.includes("zzz/custom");
+    })());
+  T.__setState({ compat: { default_channel: "qwenwork", max_tokens_cap: 32000, model_map: compat.model_map }, model_fallback: fallback });
+
+  // ⑥ 回读不一致必须报错（不得静默当成功）
+  T.__setSceneRules(T.sceneNormalize(compat, fallback));
+  const good = { model_map: compat.model_map };
+  check("SR-005b：回读一致时 verifySceneReadback 返回空串", T.verifySceneReadback(good) === "", T.verifySceneReadback(good));
+  const bad = { model_map: Object.assign({}, compat.model_map, { fast: "someone/else" }) };
+  const msg = T.verifySceneReadback(bad);
+  check("SR-005b：回读不一致时报出差异（含期望与实际）",
+    msg.includes("fast") && msg.includes("qwenwork/flash") && msg.includes("someone/else"), msg);
+  check("SR-005b：服务端没回 model_map 时不误报（返回空串）", T.verifySceneReadback({}) === "");
+
+  // ⑦ 改主模型 / 追加备胎的本地守卫
+  T.__setSceneRules(T.sceneNormalize(compat, fallback));
+  const before = JSON.stringify(T.__getSceneRules());
+  T.sceneSetFrom("fast", "traecode/deepseek-v4.1-flash"); // 该模型在 fast 的备胎链上 ⇒ 会成自环
+  check("SR-005b：把主模型改成链上已有的备胎被拒（不静默删数据，与 SR-003 同口径）",
+    JSON.stringify(T.__getSceneRules()) === before, JSON.stringify(T.__getSceneRules()));
+  T.sceneAddTo("fast", "qwenwork/flash");
+  check("SR-005b：追加与主模型相同的备胎被拒", JSON.stringify(T.__getSceneRules()) === before);
+  T.sceneAddTo("fast", "traecode/deepseek-v4.1-flash");
+  check("SR-005b：追加已在链上的备胎被拒（去重）", JSON.stringify(T.__getSceneRules()) === before);
+  T.sceneAddTo("fast", "kilo/cohere/north-mini-code:free");
+  check("SR-005b：追加新备胎成功", (T.__getSceneRules().fast.to || []).includes("kilo/cohere/north-mini-code:free"));
+  // 改序：上移第 3 项 → 变第 2 项（序号即优先级）
+  T.sceneMoveTo("fast", 2, -1);
+  check("SR-005b：上移改序生效且序号随之变化",
+    JSON.stringify(T.__getSceneRules().fast.to) ===
+      JSON.stringify(["traecode/deepseek-v4.1-flash", "kilo/cohere/north-mini-code:free", "qodercn/glm-5.3-flash"]),
+    JSON.stringify(T.__getSceneRules().fast.to));
+  T.sceneMoveTo("fast", 0, -1);
+  check("SR-005b：首位上移是空操作（边界不越界）",
+    T.__getSceneRules().fast.to[0] === "traecode/deepseek-v4.1-flash");
+  T.sceneDelTo("fast", 1);
+  check("SR-005b：移除备胎生效",
+    !T.__getSceneRules().fast.to.includes("kilo/cohere/north-mini-code:free"),
+    JSON.stringify(T.__getSceneRules().fast.to));
+
+  // ⑧ 渲染只读：renderSceneCards 不得改动 sceneRules（同 SR-003 的 G1 纪律）
+  const snap = JSON.stringify(T.__getSceneRules());
+  T.renderSceneCards();
+  check("SR-005b：渲染是只读的（渲染前后 sceneRules 逐字节相等）", JSON.stringify(T.__getSceneRules()) === snap);
+
+  // ⑨ 候选池常量：三场景齐备、只含 id/证据等级/摘出标记（活值现取，不搬快照数字）
+  check("SR-005b：SCENE_CANDIDATES 含三个场景",
+    JSON.stringify(T.SCENE_CANDIDATES.scenes.map((s) => s.alias)) === JSON.stringify(["fast", "code", "complex"]),
+    JSON.stringify(T.SCENE_CANDIDATES.scenes.map((s) => s.alias)));
+  const allCand = T.SCENE_CANDIDATES.scenes.flatMap((s) => s.candidates);
+  check("SR-005b：候选条目只有 id/report_evidence/routed_out 三个键（不夹带快照活值）",
+    allCand.every((c) => JSON.stringify(Object.keys(c).sort()) === JSON.stringify(["id", "report_evidence", "routed_out"])),
+    JSON.stringify(Object.keys(allCand[0] || {}).sort()));
+  check("SR-005b：候选池非空（每场景至少 3 个）",
+    T.SCENE_CANDIDATES.scenes.every((s) => s.candidates.length >= 3),
+    T.SCENE_CANDIDATES.scenes.map((s) => s.candidates.length).join(","));
+  check("SR-005b：候选池保留了 workbuddy 的 routed_out 标记（SD-5 不标注但数据要在）",
+    T.SCENE_CANDIDATES.scenes.some((s) => s.candidates.some((c) => c.routed_out === true)));
+
+  // ⑩ 接线：openSettings 必须真的调 openSceneEditor，且 openSceneEditor 里**有 await**。
+  // 这是 R-3b 的静态面：SD-7「每次打开重算重排」要求先取新数据，拿旧缓存冒充等于假动作。
+  // 不 await 的写法（`loadFees();` 不带 await）在功能上会「先渲染旧数据再异步刷新」，
+  // 而这恰恰是要防的——净效果与不刷新等价，却看起来像做了。
+  const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const cssSrc = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  // ⚠️ 不能只查「openSceneEditor()」这个子串：注释里也含它（变异验证首跑 0 红就是这个原因）。
+  // 用「行首无 // 的 await 调用」判据——被注释掉的调用、以及被改名的调用都会红。
+  check("SR-005b：openSettings 里**真的**调用了 openSceneEditor（非注释、非改名）",
+    /\n\s*await openSceneEditor\(\);/.test(raw)
+    && raw.indexOf('$("settingsOverlay").classList.remove("hidden")') < raw.indexOf("await openSceneEditor();"));
+  check("SR-005b：openSceneEditor 内部 await 取数（不得用旧缓存冒充新数据，R-3b）",
+    /async function openSceneEditor\(\)[\s\S]{0,600}await loadFees\(\)/.test(raw));
+  check("SR-005b：openSettings 声明为 async（await openSceneEditor 需要）",
+    /async function openSettings\(\)/.test(raw));
+  check("SR-005b：index.html 有 #secScene 区块且排在 #secFallback 之前（A-1 挂载点）",
+    htmlSrc.indexOf('id="secScene"') > 0 && htmlSrc.indexOf('id="secScene"') < htmlSrc.indexOf('id="secFallback"'));
+  check("SR-005b：index.html 三个按钮齐（复制 / 预检 / 保存）",
+    ["btnSceneCopy", "btnSceneDryRun", "btnSceneSave"].every((x) => htmlSrc.includes(`id="${x}"`)));
+  check("SR-005b：app.js 三个按钮都已接线（存在但没接线 = 点了没反应）",
+    raw.includes('$("btnSceneCopy").onclick') && raw.includes('$("btnSceneDryRun").onclick')
+    && raw.includes('$("btnSceneSave").onclick'));
+  check("SR-005b：#sceneCards 上挂了 change / keydown / click 三个委托",
+    raw.includes('$("sceneCards").addEventListener("change"') && raw.includes('$("sceneCards").addEventListener("keydown"')
+    && raw.includes('$("sceneCards").addEventListener("click"'));
+  // 用 indexOf 而不是正则：这个串里有 `('/` 与 `\/` 混排，写成正则会被 JS 解析成「提前闭合 + 非法 flag」。
+  const saveFn = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
+  check("SR-005b：保存走的是原子端点（不是两次 POST 补偿，SD-6）",
+    saveFn.includes('/api/config/scene_routing') && !saveFn.includes('/api/config/compat')
+    && !saveFn.includes('/api/config/model_fallback'));
+  check("SR-005b：style.css 有 .scene-card / .scene-lbl / a.is-off 样式",
+    cssSrc.includes(".scene-card") && cssSrc.includes(".scene-lbl") && /a\.is-off/.test(cssSrc));
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {
@@ -1201,14 +1428,17 @@ const LIVE_FB = [
   const html = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
   const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
   const need = [
-    ["两处 cfg-heading 各带一个 data-model-search 查找按钮",
-      (html.match(/data-model-search/g) || []).length === 2],
-    // 文案带「🔍 查询模型」：设置内两处 + 模型列表标题行一处（#139 把首页纯图标入口也改成了带字文案）。
+    // 2026-10-29 起设置内从「两处」变「三处」：新增 #secScene（三场景路由，SR-005b）
+    // 也带查找入口。断言数量而不是「存在」是为了防回退（删掉任一处都会变红）。
+    ["三处 cfg-heading 各带一个 data-model-search 查找按钮",
+      (html.match(/data-model-search/g) || []).length === 3],
+    // 文案带「🔍 查询模型」：设置内三处 + 模型列表标题行一处（#139 把首页纯图标入口也改成了带字文案）。
     // 只断言数量是为了防“改回纯图标”回退：纯图标入口在触屏/小字号下不可发现。
-    ["按钮文案含「🔍 查询模型」（设置内两处 + 模型列表标题行一处）",
-      (html.match(/🔍 查询模型/g) || []).length === 3],
+    ["按钮文案含「🔍 查询模型」（设置内三处 + 模型列表标题行一处）",
+      (html.match(/🔍 查询模型/g) || []).length === 4],
     ["模型降级链标题右侧有查找入口", /模型降级链[\s\S]{0,80}data-model-search/.test(html)],
     ["思考强度标题右侧有查找入口", /思考强度[\s\S]{0,80}data-model-search/.test(html)],
+    ["三场景路由标题右侧有查找入口", /三场景路由[\s\S]{0,80}data-model-search/.test(html)],
     ["app.js 统一接线 data-model-search → openModelSearch",
       /querySelectorAll\("\[data-model-search\]"\)/.test(raw) && raw.includes("el.onclick = openModelSearch")],
     ["style.css 有 .cfg-search-btn 样式（宽度自适应，与首页 search-btn 同源）",

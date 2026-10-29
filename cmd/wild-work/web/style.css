@@ -1658,6 +1658,26 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .fb-to-chip.drop-before { box-shadow: -2px 0 0 0 var(--primary); }
 .fb-to-chip.drop-after { box-shadow: 2px 0 0 0 var(--primary); }
 
+/* 三场景路由卡片（SR-005b）：与降级链卡片同一设计语言，只补三个专用元素。
+   - .scene-label：场景中文名（快速/代码/复杂），紧随别名徽标。
+   - .scene-lbl：卡片内左侧标签列，窄于设置区的 .lbl.wide（这里没有长标签）。
+   - a.is-off：备胎 chip 上的 ↑/↓ 在首尾位置置灰（**保留可见但不可用**，不是隐藏——
+     隐藏会让 chip 宽度在改序时跳动，用户点不到第二下）。
+   全部走既有 CSS 变量，无裸 hex、无新弹窗宽度档（R84/R99 既有纪律）。 */
+.scene-card .fb-rule-badge { font-family: ui-monospace, Consolas, monospace; }
+.scene-label {
+  flex: none; font-size: 12px; font-weight: 600; color: var(--text);
+  background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+}
+.scene-lbl { flex: none; width: 60px; font-size: 12px; color: var(--muted); }
+.scene-card .fb-to-chip { cursor: default; }
+.scene-card .fb-to-chip a { color: var(--muted); text-decoration: none; font-size: 12px; line-height: 1; }
+.scene-card .fb-to-chip a:hover { color: var(--primary); }
+.scene-card .fb-to-chip a.is-off { opacity: .3; pointer-events: none; }
+.scene-card .fb-to-chip a[data-scene-del]:hover { color: var(--danger); }
+.scene-card[data-invalid="1"] { border-color: var(--danger); }
+.scene-sum { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; word-break: break-all; }
+
 /* 思考强度映射卡片：档位 + 删除左对齐（不推最右） */
 .fb-map-card .fb-map-model {
   flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

@@ -477,6 +477,25 @@
         <div class="hint" id="proxyErr" style="color:var(--danger)"></div>
       </div>
 
+      <!-- 三场景路由（SR-005b）：fast / code / complex 三个别名背后的主模型 + 有序备胎链 -->
+      <div class="cfg-section" id="secScene">
+        <div class="cfg-heading"><span>三场景路由</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
+            客户端把模型名填成 <code>fast</code> / <code>code</code> / <code>complex</code> 时，这里决定它<b>实际打到哪个渠道的哪个模型</b>，以及打不通时按什么顺序换备胎。<br><br>
+            三场景是<b>一个整体</b>：别名指向与备胎链必须同时成立，故这里<b>一次保存写全部三项</b>（服务端原子写）。改一个场景不会只落一半。<br><br>
+            <b>互为备胎是合法的</b>：code 的主模型可以出现在 complex 的备胎链里，反之亦然（现役配置就是这么用的）。只有「备胎 = 自己这条链的主模型」（自环）会被拒。<br><br>
+            保存前会把<b>当前值自动复制到剪贴板</b>，万一改坏了可直接粘回来。<br><br>
+            点「预检」只校验并显示服务端提醒，<b>不写盘</b>。
+          </span></span></div>
+        <div id="sceneCards"></div>
+        <div class="row fb-foot-actions" style="margin-top:8px">
+          <button class="btn small" id="btnSceneCopy" title="把当前生效的三别名映射与三条降级链复制到剪贴板（保存前后都可点）">复制当前配置</button>
+          <button class="btn small" id="btnSceneDryRun" title="只校验 + 显示提醒，不写盘">预检（不写盘）</button>
+          <button class="btn small primary" id="btnSceneSave" title="保存前自动把旧值复制到剪贴板，然后原子写盘">保存三场景</button>
+        </div>
+        <div class="hint" id="sceneWarn" style="color:var(--warn);margin-top:6px"></div>
+        <div class="hint" id="sceneErr" style="color:var(--danger)"></div>
+      </div>
+
       <!-- 模型降级链 -->
       <div class="cfg-section" id="secFallback">
         <div class="cfg-heading"><span>模型降级链</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
