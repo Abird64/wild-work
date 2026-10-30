@@ -52,7 +52,10 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 	}
 }
 
-type qwReadErr struct{ payload string; sent bool }
+type qwReadErr struct {
+	payload string
+	sent    bool
+}
 
 func (r *qwReadErr) Read(p []byte) (int, error) {
 	if !r.sent {
@@ -62,7 +65,10 @@ func (r *qwReadErr) Read(p []byte) (int, error) {
 	return 0, fmt.Errorf("simulated: connection reset")
 }
 
-type qwCut struct{ payload string; keep, off int }
+type qwCut struct {
+	payload   string
+	keep, off int
+}
 
 func (r *qwCut) Read(p []byte) (int, error) {
 	if r.off >= r.keep {

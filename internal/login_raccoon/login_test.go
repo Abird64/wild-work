@@ -1,4 +1,4 @@
-﻿package login_raccoon
+package login_raccoon
 
 import (
 	"encoding/base64"

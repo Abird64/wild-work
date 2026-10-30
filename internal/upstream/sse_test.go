@@ -403,7 +403,10 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 	}
 }
 
-type readErrAfter struct{ payload string; sent bool }
+type readErrAfter struct {
+	payload string
+	sent    bool
+}
 
 func (r *readErrAfter) Read(p []byte) (int, error) {
 	if !r.sent {
@@ -413,7 +416,10 @@ func (r *readErrAfter) Read(p []byte) (int, error) {
 	return 0, errors.New("simulated: broken pipe")
 }
 
-type cutStream struct{ payload string; keep, off int }
+type cutStream struct {
+	payload   string
+	keep, off int
+}
 
 func (r *cutStream) Read(p []byte) (int, error) {
 	if r.off >= r.keep {

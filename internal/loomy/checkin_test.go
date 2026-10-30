@@ -64,7 +64,9 @@ func nopReward(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, `unexpected rewards call`)
 }
 
-func testAuth() *auth.Auth { return &auth.Auth{Kind: "loomy", AccessToken: "0123456789abcdef0123456789abcdef"} }
+func testAuth() *auth.Auth {
+	return &auth.Auth{Kind: "loomy", AccessToken: "0123456789abcdef0123456789abcdef"}
+}
 
 // okEnvelope 上游成功信封（code 必须是字符串 "000000"，见 points-service.js:208）。
 func okEnvelope(data string) string { return `{"code":"000000","desc":"","data":` + data + `}` }
@@ -477,7 +479,7 @@ func TestDailyCheckinViaDailyCheckinReportsClosure(t *testing.T) {
 // 被 noExplicitCheckin 挡着、定时任务全关，功能等于没做（"写了却不生效"）。
 //
 // 现在改为让 DailyCheckinReport(a) 自己在内部取业务日，从而复用既有的三条签到链路
-//（手动 / 全部签到 / 定时）。因此本断言必须**正向**锁定它实现了标准接口 ——
+// （手动 / 全部签到 / 定时）。因此本断言必须**正向**锁定它实现了标准接口 ——
 // 否则一旦有人"清理"掉这个方法，签到会再次静默失效。
 func TestImplementsProviderCheckinReporter(t *testing.T) {
 	var up provider.Upstream = New()

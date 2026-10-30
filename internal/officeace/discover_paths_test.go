@@ -71,7 +71,7 @@ func TestInstallRootsIncludesWindowsPerUserPrograms(t *testing.T) {
 
 // TestInstallRootsInfersPerUserRootWithoutLocalAppData：%LOCALAPPDATA% 缺失时的兜底推导必须落在
 // <用户目录>\AppData\Local\Programs\OfficeAce；**不得**落到 <用户目录>\AppData\Programs\OfficeAce
-//（后者是「用 filepath.Dir(os.UserConfigDir()) 当 Local」这一错误的产物，本用例专挡它）。
+// （后者是「用 filepath.Dir(os.UserConfigDir()) 当 Local」这一错误的产物，本用例专挡它）。
 func TestInstallRootsInfersPerUserRootWithoutLocalAppData(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("per-user 安装根候选是 Windows 语义")
@@ -88,9 +88,9 @@ func TestInstallRootsInfersPerUserRootWithoutLocalAppData(t *testing.T) {
 			t.Fatalf("建候选目录失败：%v", err)
 		}
 	}
-	t.Setenv("LOCALAPPDATA", "")                                // 模拟缺失
-	t.Setenv("USERPROFILE", userProfile)                        // 推导 ①
-	t.Setenv("APPDATA", filepath.Join(appData, "Roaming"))      // 推导 ②（os.UserConfigDir 的来源）
+	t.Setenv("LOCALAPPDATA", "")                           // 模拟缺失
+	t.Setenv("USERPROFILE", userProfile)                   // 推导 ①
+	t.Setenv("APPDATA", filepath.Join(appData, "Roaming")) // 推导 ②（os.UserConfigDir 的来源）
 	t.Setenv("OFFICEACE_INSTALL_DIR", "")
 
 	roots := installRoots(nil)

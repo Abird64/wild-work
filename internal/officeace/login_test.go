@@ -36,8 +36,8 @@ type fakeUpstream struct {
 	stateCalls  int
 
 	// code 端点（轮询）
-	codePending   int  // 前 N 次回 202
-	codeHTTP      int  // 非 0 时覆盖：直接回这个状态码
+	codePending   int // 前 N 次回 202
+	codeHTTP      int // 非 0 时覆盖：直接回这个状态码
 	codeBody      string
 	codeCalls     int
 	codeQueries   []string
@@ -604,12 +604,12 @@ func TestAuthorizeURLShape(t *testing.T) {
 	}
 	q := inner.Query()
 	want := map[string]string{
-		"client_id":            "pdp5_for_agentarts",
-		"code_challenge":       "chal-1",
+		"client_id":             "pdp5_for_agentarts",
+		"code_challenge":        "chal-1",
 		"code_challenge_method": "SHA-256",
-		"state":                "st-1",
-		"redirect_uri":         redirectURI,
-		"response_type":        "code",
+		"state":                 "st-1",
+		"redirect_uri":          redirectURI,
+		"response_type":         "code",
 	}
 	for k, v := range want {
 		if q.Get(k) != v {

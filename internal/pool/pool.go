@@ -67,8 +67,8 @@ type Status struct {
 	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
 	// SessionDead 登录态失效（401/登录已失效）：挑号跳过 + 面板「需重新登录」徽标（#134）。
 	// 与 Disabled（用户手动停用）分离，避免机器状态混入用户控制项。
-	SessionDead       bool      `json:"session_dead,omitempty"`
-	SessionDeadReason string    `json:"session_dead_reason,omitempty"`
+	SessionDead       bool   `json:"session_dead,omitempty"`
+	SessionDeadReason string `json:"session_dead_reason,omitempty"`
 	// SessionDeadAt 标记**首次**进入失效态的时刻，是「重登后自动清除」的时间锚
 	// （clearReloggedLocked 比较 auth 文件 mtime 与它）。已标记时不得刷新成 now，
 	// 否则重登后再一次陈旧凭证失败就会把锚顶到文件之后 ⇒ 永不清除（#134 死锁）。

@@ -68,9 +68,9 @@ type ModelStat struct {
 // 前端不要用 Recent 的顺序去解释 ModelStat 的数字。
 type ModelRecent struct {
 	Model  string `json:"model"`
-	LastTS int64  `json:"last_ts"`           // 最近一次成功记账的 unix 秒（绝对时刻，跨天保留）
-	Reqs   int64  `json:"reqs,omitempty"`    // 今日次数（今日没跑则为 0，不是「总数」）
-	Tokens int64  `json:"tokens,omitempty"`  // 今日 token（同上）
+	LastTS int64  `json:"last_ts"`          // 最近一次成功记账的 unix 秒（绝对时刻，跨天保留）
+	Reqs   int64  `json:"reqs,omitempty"`   // 今日次数（今日没跑则为 0，不是「总数」）
+	Tokens int64  `json:"tokens,omitempty"` // 今日 token（同上）
 }
 
 // recentModelsLimit 首页「最近在用」列表的条数上限。

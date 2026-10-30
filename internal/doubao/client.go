@@ -1,7 +1,6 @@
 package doubao
 
 import (
-	"wild-work/internal/doubaocdp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"wild-work/internal/doubaocdp"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/provider"

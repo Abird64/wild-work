@@ -15,8 +15,9 @@ import (
 // StreamCapture/Aggregate 只认 `data: `（**带空格**）⇒
 //   - StreamCapture：帧掉进「其他行」分支原样透传，但 validFrames 恒 0
 //     ⇒ 触发「空流」兜底，给**每个正常回答额外追加一帧**
-//        `{"error":{"message":"empty upstream stream",...}}`，并返回 errEmptyStream；
+//     `{"error":{"message":"empty upstream stream",...}}`，并返回 errEmptyStream；
 //   - Aggregate（非流式）：帧完全不被识别 ⇒ validEvents=0 ⇒ 直接 502 upstream_parse。
+//
 // 而 errEmptyStream 会被上层当作「账号连续错误」处理（见 client.go:223 的注释），
 // 于是健康账号被冷却 —— 这才是「6/6 全坏」的完整链条。
 func TestSSENoSpaceAfterColon(t *testing.T) {

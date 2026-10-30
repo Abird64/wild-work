@@ -1,5 +1,10 @@
 # 编译产物
 dist/
+# 裸 `go build ./cmd/wild-work` 会把产物落在仓库根目录（工作目录=模块根）。
+# 2026-10-30 实测踩过：审计期间在根目录留下 21MB 的 `wild-work` 二进制，
+# 差点随改动一起入库。正式产物一律走 dist/ 或显式 -o。
+/wild-work
+/wild-work.exe
 cmd/wild-work/rsrc_windows_amd64.syso
 cmd/wild-work/icon.ico
 

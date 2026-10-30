@@ -22,11 +22,11 @@ import (
 // 在 wild-work 的存储里，网关 Authorization 放进 auth.Auth.AccessToken，
 // base_url 放进 auth.Auth.ApiHost，其余扩展字段放进 auth.Auth.Extra。
 type Account struct {
-	ID              string // "<accountId>:<userId>"
-	AccountID       string
-	UserID          string
-	Label           string
-	BaseURL         string // 网关**裸 host**（形如 https://modelgw-0004.officeace.<region>.huaweicloud-agentarts.com）
+	ID        string // "<accountId>:<userId>"
+	AccountID string
+	UserID    string
+	Label     string
+	BaseURL   string // 网关**裸 host**（形如 https://modelgw-0004.officeace.<region>.huaweicloud-agentarts.com）
 	// ⚠️ 必须存裸 host、不带 `/v2`：同一字段被两类端点复用，而它们的前缀要求相反
 	// （issue #152）：模型/对话要 `{host}/v2/...`，额度/签到要 `{host}/v1/subscription`。
 	// 存带 /v2 的值会让额度请求变成 `{host}/v2/v1/subscription` → APIG.0303 app not found。

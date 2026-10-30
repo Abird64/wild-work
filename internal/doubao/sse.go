@@ -138,6 +138,7 @@ func (d *textDiffer) Delta(blockID, full string) (delta string, rewritten bool) 
 // ⚠️ 与 FULL_MSG_NOTIFY 的区别是本渠道最容易踩的坑：
 //   - FULL_MSG_NOTIFY  → {"message": {...}}   ← 用户提问的回显
 //   - STREAM_MSG_NOTIFY → {"content": {...}}  ← 助手的回答
+//
 // 两者 content_block 形状相同，只差外层字段名。
 type streamMsgNotify struct {
 	Content struct {

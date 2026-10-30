@@ -158,10 +158,10 @@ func (c *Client) dialPage(ctx context.Context) (*doubaocdp.CDP, error) {
 //
 // 编排（每一步都在页面上下文里执行，签名由前端 hook 自动注入）：
 //
-//	1. warmup   建会话，从 SSE_ACK 取 conversation_id
-//	2. modify   设 conversation_type=3 / model_item_key=9 / reasoning_effort=4
-//	3. 发消息   conversation_id 回填，模型设置自此生效
-//	4. 流结束后删除会话（尽力而为）
+//  1. warmup   建会话，从 SSE_ACK 取 conversation_id
+//  2. modify   设 conversation_type=3 / model_item_key=9 / reasoning_effort=4
+//  3. 发消息   conversation_id 回填，模型设置自此生效
+//  4. 流结束后删除会话（尽力而为）
 func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	setupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -11,10 +11,10 @@ import "testing"
 func TestURLEscapeUIDPreservesPathEscapes(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"01a13f3d3ee6741d:01a13f3d3ee67da0", "01a13f3d3ee6741d%3A01a13f3d3ee67da0"}, // 真实形态
-		{"a/b:c", "a%2Fb%3Ac"},   // '/' 必须保持转义
+		{"a/b:c", "a%2Fb%3Ac"},     // '/' 必须保持转义
 		{"a%3Ab:c", "a%253Ab%3Ac"}, // '%' 必须转义成 %25
-		{"a b:c", "a%20b%3Ac"},   // 空格必须转义
-		{"plain", "plain"},       // 不含 ':' 时与输入一致
+		{"a b:c", "a%20b%3Ac"},     // 空格必须转义
+		{"plain", "plain"},         // 不含 ':' 时与输入一致
 		{"", ""},
 	}
 	for _, c := range cases {

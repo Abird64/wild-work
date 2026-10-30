@@ -22,14 +22,14 @@ const (
 // 是同一归一的两个名字，合并统一取上游名，见 quota.go 的说明。）
 func TestBareGatewayStripsDataNamespace(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{testHostV2, testHostNoV2},                     // 导入形态
-		{testHostV2 + "/", testHostNoV2},               // 尾部斜杠
-		{testHostNoV2, testHostNoV2},                   // OAuth 形态（幂等）
-		{testHostNoV2 + "/", testHostNoV2},             //
-		{testHostNoV2 + "/V2", testHostNoV2},           // 大小写不敏感
+		{testHostV2, testHostNoV2},                         // 导入形态
+		{testHostV2 + "/", testHostNoV2},                   // 尾部斜杠
+		{testHostNoV2, testHostNoV2},                       // OAuth 形态（幂等）
+		{testHostNoV2 + "/", testHostNoV2},                 //
+		{testHostNoV2 + "/V2", testHostNoV2},               // 大小写不敏感
 		{testHostNoV2 + "/v2/v1", testHostNoV2 + "/v2/v1"}, // 只剥尾部，不递归
 		{testHostNoV2 + "/api/v2", testHostNoV2 + "/api"},
-		{testHostNoV2 + "/v1", testHostNoV2 + "/v1"},   // /v1 不是数据面命名空间
+		{testHostNoV2 + "/v1", testHostNoV2 + "/v1"}, // /v1 不是数据面命名空间
 		{"", ""},
 		{"  " + testHostV2 + "  ", testHostNoV2}, // 前后空白
 	}

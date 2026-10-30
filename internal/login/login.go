@@ -19,8 +19,8 @@ import (
 
 // 上游常量（国内版 / 国际版）。
 const (
-	UpstreamBaseCN      = "https://copilot.tencent.com"
-	UpstreamBaseGlobal  = "https://www.workbuddy.ai"
+	UpstreamBaseCN     = "https://copilot.tencent.com"
+	UpstreamBaseGlobal = "https://www.workbuddy.ai"
 	// 与聊天链同一客户端身份（官方桌面 5.8.3 内嵌 CLI 2.161.0，R117）。
 	clientUA            = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
 	originRefererCN     = "https://www.codebuddy.cn"

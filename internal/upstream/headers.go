@@ -153,5 +153,3 @@ func acceptLanguageFor(a *auth.Auth) string {
 	}
 	return "zh-CN"
 }
-
-

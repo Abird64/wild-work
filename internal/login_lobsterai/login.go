@@ -200,7 +200,9 @@ func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 //
 // 回调口只绑 127.0.0.1，redirect_uri 恒为 `http://127.0.0.1:<port>/auth/callback`。
 // 这不是保守，而是上游的硬约束：portal 的回调派发器（ElectronAuth）里有
-//   hostname === "127.0.0.1" && protocol === "http:" && pathname === "/auth/callback" && port
+//
+//	hostname === "127.0.0.1" && protocol === "http:" && pathname === "/auth/callback" && port
+//
 // 严格判定，**不满足就丢弃 redirect_uri**，改发 `lobsterai://auth/callback?code=…`
 // deep-link（只有装了桌面客户端的机器才认）。2026-10-18 读 portal 前端源码实证，
 // 见 docs/决议项.md R97：把 redirect_uri 改成网关 LAN IP 的做法在上游层面无效。

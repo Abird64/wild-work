@@ -366,8 +366,8 @@ func TestOfficeAceImportNoteDistinguishesKeptCredentials(t *testing.T) {
 	}
 	code := string(src)
 	for _, want := range []string{
-		"保留了本工具已保存的 OAuth 凭据",                 // 已保留既有凭据
-		"其到期时间已按保留凭据自己的到期对齐",              // 且说明了 expiresAt 被纠正（改进1）
+		"保留了本工具已保存的 OAuth 凭据",                // 已保留既有凭据
+		"其到期时间已按保留凭据自己的到期对齐",                 // 且说明了 expiresAt 被纠正（改进1）
 		"未取得 refresh_token，积分/签到需在本工具重新登录一次", // 导入本来就没有
 	} {
 		if !strings.Contains(code, want) {

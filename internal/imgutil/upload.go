@@ -7,6 +7,7 @@
 // 图床选型依据 ref/大陆可达图床评估.md（2026-10-16 实测）：
 //   - 主选 file.sang.pub meitu 通道（落地 meitudata.com 大陆 CDN）；
 //   - 失败回退 icve 通道（落地 file.icve.com.cn，任意格式、上限 100MB）。
+//
 // ⚠️ 必须 raw binary body（--data-binary 语义），multipart 会被原样存成信封。
 // ⚠️ 参考图会上传到第三方：只用于本工具的生图链路，用户应知悉该行为。
 package imgutil

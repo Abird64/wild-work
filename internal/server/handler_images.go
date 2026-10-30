@@ -19,8 +19,8 @@ package server
 
 import (
 	"encoding/base64"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -142,8 +142,8 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	var prompt string
-	var raws [][]byte  // 每张参考图的原始字节（URL 形态在 resolve 时特判直传）
-	var outFmt string  // output_format（png 时产物转真 PNG）
+	var raws [][]byte // 每张参考图的原始字节（URL 形态在 resolve 时特判直传）
+	var outFmt string // output_format（png 时产物转真 PNG）
 
 	if strings.HasPrefix(ct, "multipart/") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -269,7 +269,7 @@ func resolveReferenceURL(raws [][]byte) (string, error) {
 			}
 		}
 	}
-var sheet []byte
+	var sheet []byte
 	var err error
 	if len(images) == 1 {
 		// 单图（base64/dataURI/webp 等形态）：统一转 JPEG 后托管——

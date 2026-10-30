@@ -3,6 +3,7 @@
 //   - statRow.Model / stats.AddUsage → CanonicalModelID(fbID)（备胎规范对外 ID）；
 //   - ledger.AppendUsage.Model → UpstreamModelOf(fbID)（备胎上游模型名）；
 //   - Ch 同步为备胎渠道（Ch 本就取降级后 rt.Kind，改后 Model 与 Ch 自洽）。
+//
 // 无降级时保持原口径不变（canonModel / 客户端请求名的上游模型名）。
 // 原请求名→备胎的对照由日志行 + 降级记录区块 + X-Model-Fallback 头承担。
 package server
@@ -29,10 +30,12 @@ import (
 // 使 handler 走到 ledger/stats 记账分支。
 type acctUpstream struct{}
 
-func (u *acctUpstream) RefreshToken(*auth.Auth) error                                  { return nil }
-func (u *acctUpstream) FetchModels(*auth.Auth) ([]provider.ModelInfo, error)           { return nil, nil }
-func (u *acctUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) { return nil, nil }
-func (u *acctUpstream) UserResource(*auth.Auth) (int64, error)                         { return 0, nil }
+func (u *acctUpstream) RefreshToken(*auth.Auth) error                        { return nil }
+func (u *acctUpstream) FetchModels(*auth.Auth) ([]provider.ModelInfo, error) { return nil, nil }
+func (u *acctUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) {
+	return nil, nil
+}
+func (u *acctUpstream) UserResource(*auth.Auth) (int64, error) { return 0, nil }
 func (u *acctUpstream) UserResourceDetail(*auth.Auth) (int64, []provider.ResourceItem, error) {
 	return 0, nil, nil
 }

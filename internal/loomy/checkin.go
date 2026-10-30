@@ -6,18 +6,18 @@
 // + 渲染 bundle）里 "签到" / "daily-checkin" / "claimDaily" / "领取每日" 的命中数都是 0。
 // 与「每日积分」相关的真实机制有两条，且都不是「登录就发」：
 //
-//	1. 每日赠送额度 5000（dailyBalance）—— 上游服务端惰性刷新。
-//	   官方 UI 原文（dist/assets/main-*.js）：
-//	     "每日赠送积分会在你每日登录后自动刷新为 5000"
-//	   它按 dailyCycleDate（服务端业务日）滚动，用户无需、也没有任何"领取"动作。
-//	   本包不碰它：读余额（GET /api/v1/points/records）就已能反映刷新结果。
+//  1. 每日赠送额度 5000（dailyBalance）—— 上游服务端惰性刷新。
+//     官方 UI 原文（dist/assets/main-*.js）：
+//     "每日赠送积分会在你每日登录后自动刷新为 5000"
+//     它按 dailyCycleDate（服务端业务日）滚动，用户无需、也没有任何"领取"动作。
+//     本包不碰它：读余额（GET /api/v1/points/records）就已能反映刷新结果。
 //
-//	2. 宠物每日打工奖励（0~1000 积分，按档发放）—— 这才是真正"需要领"的东西。
-//	   端点（points-service.js:434-450 / :416-418）：
-//	     GET  /api/v1/pet-work          -> 快照：enabled / businessDate / config / status
-//	     POST /api/v1/pet-work/rewards  -> 领奖：{businessDate, configVersion, reachedTierId}
-//	   发放判据由服务端计算（pet-work-service.js:1071-1124 在开轮前查快照取 enabled，
-//	   达标后 :979-1069 发领奖请求），客户端只提交「业务日 + 配置版本 + 已达档位」。
+//  2. 宠物每日打工奖励（0~1000 积分，按档发放）—— 这才是真正"需要领"的东西。
+//     端点（points-service.js:434-450 / :416-418）：
+//     GET  /api/v1/pet-work          -> 快照：enabled / businessDate / config / status
+//     POST /api/v1/pet-work/rewards  -> 领奖：{businessDate, configVersion, reachedTierId}
+//     发放判据由服务端计算（pet-work-service.js:1071-1124 在开轮前查快照取 enabled，
+//     达标后 :979-1069 发领奖请求），客户端只提交「业务日 + 配置版本 + 已达档位」。
 //
 // # 为什么本工具拿不到这份积分（核心限制，必须如实说明）
 //
@@ -82,10 +82,10 @@ func (c *Client) BusinessDateOf(a *auth.Auth) (string, error) {
 // Loomy 的领奖请求体必须带服务端业务日，而上游业务日只能从 pet-work 快照读。
 // 早先的实现思路是「另立 DatedCheckinReporter + 让调度器先取快照再调用」，但那要求改动
 // 调度器与 app 的签到链路；那段接线最终没有落地 ⇒ 本渠道的签到实际上**没有任何入口**
-//（面板按钮不可用、定时任务全关），功能等于没做。
+// （面板按钮不可用、定时任务全关），功能等于没做。
 //
 // 现在改为：本方法自己完成「取业务日 → 领奖」两步，于是既有的三条签到链路
-//（面板手动 / 全部签到 / 定时签到）**零改动**即可驱动 Loomy。
+// （面板手动 / 全部签到 / 定时签到）**零改动**即可驱动 Loomy。
 //
 // # 代价与边界（如实说明）
 //

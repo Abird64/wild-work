@@ -370,10 +370,10 @@ func (c *CDP) Evaluate(ctx context.Context, expr string, out any) error {
 func (c *CDP) EvaluateAsync(ctx context.Context, expr string) error {
 	var res evalResult
 	err := c.Call(ctx, "Runtime.evaluate", map[string]any{
-		"expression":        expr,
-		"returnByValue":     false,
-		"awaitPromise":      false,
-		"silent":            true,
+		"expression":    expr,
+		"returnByValue": false,
+		"awaitPromise":  false,
+		"silent":        true,
 	}, &res)
 	if err != nil {
 		return err

@@ -18,8 +18,8 @@ const (
 	// 两区分开各持一份常量（渠道包之间不共享实现）。
 	clientUA      = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
 	clientVersion = "5.8.3" // X-IDE-Version = 桌面版本（不是 CLI 版本）
-	originRef  = WBAIHost
-	wbaiDomain = "www.workbuddy.ai"
+	originRef     = WBAIHost
+	wbaiDomain    = "www.workbuddy.ai"
 
 	// EpCatalog 模型目录（国际版专用路径）。
 	EpCatalog = "/v2/enterprises/personal/models"

@@ -130,7 +130,7 @@ func workDirFor(prog string) string {
 // autostartPlist 生成开机自启 plist 内容。
 //
 // 本地补丁（2026-09-19，2026-09-24 重放到 v2.5.2 线）：对齐本机 launchd 实际运行态——
-// 无头模式 + KeepAlive + 日志重定向 + WorkingDirectory。上游原模板只写 ``--autostart``
+// 无头模式 + KeepAlive + 日志重定向 + WorkingDirectory。上游原模板只写 “--autostart“
 // 且无 KeepAlive/日志，与本机实际加载的定义不一致：一旦 bootout+bootstrap（或重启）
 // 按磁盘 plist 重载，服务会退化为「崩溃不自愈、无日志」形态。
 //

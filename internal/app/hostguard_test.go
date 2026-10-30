@@ -42,8 +42,8 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"192.168.1.5:7863", false},
 		{"10.0.0.7", false},
 		{"wildwork.local", false},
-		{"localhost.evil.com", false},   // 前缀伪装
-		{"127.0.0.1.evil.com", false},   // 后缀伪装
+		{"localhost.evil.com", false}, // 前缀伪装
+		{"127.0.0.1.evil.com", false}, // 后缀伪装
 		{"not-a-host", false},
 	}
 	for _, tc := range cases {

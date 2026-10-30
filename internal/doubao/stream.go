@@ -37,9 +37,9 @@ const DefaultBotID = "7338286299411103781"
 const ModelChat = "chat"
 
 const (
-	modelName        = "豆包（客户端）"
-	modelContextWin  = 32768 // ⚠️ 上游未声明，属保守占位；面板按「未声明」展示
-	modelMaxTokens   = 8192
+	modelName       = "豆包（客户端）"
+	modelContextWin = 32768 // ⚠️ 上游未声明，属保守占位；面板按「未声明」展示
+	modelMaxTokens  = 8192
 )
 
 // StaticModels 返回静态模型表（覆盖 provider 的「静态表 ∪ 动态目录」并集口径）。
@@ -99,19 +99,19 @@ type quotaSummary struct {
 			WindowLimitGroups []struct {
 				FeatureGroup string `json:"feature_group"`
 				WindowLimits []struct {
-					WindowType    int   `json:"window_type"`
-					UsedPercent   int   `json:"used_percent"`
-					EndTime       int64 `json:"end_time"`
-					LessThanOne   bool  `json:"less_than_one_percent"`
+					WindowType  int   `json:"window_type"`
+					UsedPercent int   `json:"used_percent"`
+					EndTime     int64 `json:"end_time"`
+					LessThanOne bool  `json:"less_than_one_percent"`
 				} `json:"window_limits"`
 			} `json:"window_limit_groups"`
 		} `json:"window_limit_section"`
 		IncentiveQuotaSection struct {
-			EntitlementCount int `json:"entitlement_count"`
+			EntitlementCount  int `json:"entitlement_count"`
 			WindowLimitGroups []struct {
 				FeatureGroup     string `json:"feature_group"`
 				FeatureGroupName string `json:"feature_group_name"`
-				WindowLimits []struct {
+				WindowLimits     []struct {
 					WindowType  int   `json:"window_type"`
 					UsedPercent int   `json:"used_percent"`
 					EndTime     int64 `json:"end_time"`

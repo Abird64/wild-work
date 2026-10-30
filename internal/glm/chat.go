@@ -197,7 +197,7 @@ type glmChatMeta struct {
 }
 
 type glmCogview struct {
-	RmLabelWatermark bool   `json:"rm_label_watermark"`
+	RmLabelWatermark bool `json:"rm_label_watermark"`
 	// AspectRatio 生图比例（1:1/3:4/4:3/9:16/16:9）；对话路径不设（omitempty 不出现）。
 	AspectRatio string `json:"aspect_ratio,omitempty"`
 }
