@@ -11,13 +11,12 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"wild-work/internal/server"
 )
 
 // Config 兼容层配置。
@@ -31,6 +30,15 @@ type Config struct {
 	// MaxTokensCap 上游 max_tokens 上限（0 = 不限制）。
 	// Anthropic 客户端的 max_tokens 常远大于上游接受值，需在转发前 clamp。
 	MaxTokensCap int
+	// MaxInnerBody 内层响应体（错误体/非流式响应体）读取上限，单位字节。
+	// nil = 用 defaultMaxInnerBody。
+	//
+	// 用 thunk 而不是快照值：内层上限可在 NewHandler 里按配置
+	// （server.max_request_body_mb，R114）覆盖，因此必须**每次取值**。
+	// 装配层（cmd/wild-work）负责注入 `func() int64 { return server.MaxRequestBody }`——
+	// 这样本包不必直接读 server 的包级可变全局（同一进程里并存两个 handler 时，
+	// 全局会互相覆盖，谁生效取决于初始化顺序）。
+	MaxInnerBody func() int64
 }
 
 // SystemOneHandler 是 systemone 端点的实际处理函数。
@@ -47,6 +55,9 @@ type Gateway struct {
 	maxTokensCap int
 	sysone       SystemOneHandler // 非 nil 时注册 POST /v1/systemone
 	mu           sync.RWMutex     // 保护 router/maxTokensCap 热更新
+	// maxBody 读写请求体的上限来源（装配层注入，见 Config.MaxInnerBody）。
+	// nil 时用 defaultMaxInnerBody。
+	maxBody func() int64
 }
 
 // New 构造兼容层。inner 为 nil 时返回 nil（调用方据此跳过兼容层，保持旧行为）。
@@ -59,6 +70,7 @@ func New(cfg Config) *Gateway {
 		apiKey:       cfg.APIKey,
 		router:       cfg.Router,
 		maxTokensCap: cfg.MaxTokensCap,
+		maxBody:      cfg.MaxInnerBody,
 	}
 }
 
@@ -199,11 +211,11 @@ var nowUnix = func() int64 { return time.Now().Unix() }
 
 // parseJSONBody 读取并解析请求体，失败时按协议形状回错误。
 // anthropicShape=true 时错误体为 Anthropic 形状。
-func parseJSONBody(w http.ResponseWriter, r *http.Request, anthropicShape bool) (map[string]any, bool) {
-	raw, err := readLimited(r, maxInnerBody())
+func parseJSONBody(w http.ResponseWriter, r *http.Request, anthropicShape bool, limit func() int64) (map[string]any, bool) {
+	raw, err := readLimited(r, limit())
 	if err != nil {
 		status, code := http.StatusBadRequest, "invalid_request"
-		if server.IsBodyTooLarge(err) || strings.Contains(err.Error(), "exceeds limit") {
+		if errors.Is(err, errBodyTooLarge) || strings.Contains(err.Error(), "exceeds limit") {
 			status, code = http.StatusRequestEntityTooLarge, "request_too_large"
 		}
 		if anthropicShape {
@@ -247,7 +259,7 @@ func (g *Gateway) resolveModel(w http.ResponseWriter, model string, anthropicSha
 // 请求体：{"state": "...", "questions": {...}} → 透传到 OpenCode Zen 上游。
 // 网关负责 API key 鉴权与解析；model 固定为 jev-1.13-free（无需客户端传）。
 func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
-	body, ok := parseJSONBody(w, r, false)
+	body, ok := parseJSONBody(w, r, false, g.bodyLimit)
 	if !ok {
 		return
 	}

@@ -246,7 +246,7 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, r *http.Request, res *i
 // 其余按 4 字符 ≈ 1 token，再对消息条数与块数取下限。
 // Claude Code 用它做上下文预算，数值偏保守（略高）比偏低更安全。
 func (g *Gateway) handleCountTokens(w http.ResponseWriter, r *http.Request) {
-	body, ok := parseJSONBody(w, r, true)
+	body, ok := parseJSONBody(w, r, true, g.bodyLimit)
 	if !ok {
 		return
 	}

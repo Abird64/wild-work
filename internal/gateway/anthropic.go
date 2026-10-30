@@ -18,7 +18,7 @@ import (
 
 // handleAnthropicMessages 处理 POST /v1/messages。
 func (g *Gateway) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	body, ok := parseJSONBody(w, r, true)
+	body, ok := parseJSONBody(w, r, true, g.bodyLimit)
 	if ok {
 		g.anthropicMessages(w, r, body)
 	}

@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,7 +41,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(raw)
 }
 
-// readLimited 读取请求体（上限与内层共用 server.MaxRequestBody，issue #30）。
+// errBodyTooLarge 请求体超限哨兵（errors.Is 可判定）。
+//
+// 本包曾用 `server.IsBodyTooLarge(err)` 判定，但那比较的是内层包的哨兵，
+// 与本函数返回的错误**不是同一个**（实测恒不命中，靠后面的字符串判断兜着）——
+// 属于「看起来在解耦、实际在读另一个包的全局」的假依赖。改为本包自己的哨兵。
+var errBodyTooLarge = errors.New("request body too large")
+
+// readLimited 读取请求体（上限由装配层注入，见 Config.MaxInnerBody，issue #30/#114）。
 // 超限回 413 而非静默截断——截断后的 JSON 解析失败只会报出误导性的 invalid JSON。
 func readLimited(r *http.Request, limit int64) ([]byte, error) {
 	defer r.Body.Close()
@@ -49,7 +57,7 @@ func readLimited(r *http.Request, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(raw)) > limit {
-		return nil, fmt.Errorf("request body exceeds limit of %d bytes; please reduce conversation context", limit)
+		return nil, fmt.Errorf("%w: exceeds limit of %d bytes; please reduce conversation context", errBodyTooLarge, limit)
 	}
 	return raw, nil
 }

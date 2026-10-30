@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-
-	"wild-work/internal/server"
 )
 
 // pipeRW 是一个把响应体写入 io.Pipe 的 ResponseWriter，供内层 handler 使用。
@@ -56,6 +54,8 @@ type innerResult struct {
 	Header http.Header
 	Body   io.ReadCloser
 	cancel context.CancelFunc
+	// limit 响应体读取上限的来源（装配层注入的 thunk，见 Gateway.maxInnerBody）。
+	limit func() int64
 }
 
 // Close 释放管道与内层请求 context。调用方必须在读完后调用，否则内层 goroutine 可能阻塞在 Write 上。
@@ -71,13 +71,24 @@ func (r *innerResult) Close() {
 // ReadAll 读取完整响应体（非流式路径用），随后自动 Close。
 func (r *innerResult) ReadAll() ([]byte, error) {
 	defer r.Close()
-	return io.ReadAll(io.LimitReader(r.Body, maxInnerBody()))
+	return io.ReadAll(io.LimitReader(r.Body, r.limit()))
 }
 
-// maxInnerBody 读取上限（内层错误体/非流式响应体）。
-// 直接用 server.MaxRequestBody 的当前值——它可在 NewHandler 里按配置覆盖，
-// 所以这里必须**每次取值**，不能在包初始化时快照成常量。
-func maxInnerBody() int64 { return server.MaxRequestBody }
+// defaultMaxInnerBody 内层响应体读取上限的缺省值（128MiB，与
+// server.DefaultMaxRequestBody 同值）。仅在装配层未注入 MaxInnerBody 时生效。
+const defaultMaxInnerBody int64 = 128 << 20
+
+// bodyLimit 读写上限（内层错误体/非流式响应体，以及解析入站请求体）。
+// 优先用装配层注入的 thunk——它每次返回内层当前生效的上限
+// （可被 NewHandler 按配置覆盖，故不能快照）；未注入时退回缺省值。
+func (g *Gateway) bodyLimit() int64 {
+	if g.maxBody != nil {
+		if v := g.maxBody(); v > 0 {
+			return v
+		}
+	}
+	return defaultMaxInnerBody
+}
 
 // call 在进程内调用内层 handler（按 path 路由），返回其状态码与响应流。
 //
@@ -115,7 +126,7 @@ func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey 
 	select {
 	case status := <-p.statusCh:
 		// channel 收/发构成 happens-before，此后读 p.hdr 是安全的。
-		return &innerResult{Status: status, Header: p.hdr, Body: pr, cancel: cancel}, nil
+		return &innerResult{Status: status, Header: p.hdr, Body: pr, cancel: cancel, limit: g.bodyLimit}, nil
 	case <-ctx.Done():
 		// 客户端断连或调用方取消：关闭读端让内层写端拿到 ErrClosedPipe 退出，避免 goroutine 泄漏。
 		_ = pr.Close()

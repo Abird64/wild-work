@@ -24,7 +24,7 @@ import (
 
 // handleResponses 处理 POST /v1/responses。
 func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
-	body, ok := parseJSONBody(w, r, false)
+	body, ok := parseJSONBody(w, r, false, g.bodyLimit)
 	if !ok {
 		return
 	}
