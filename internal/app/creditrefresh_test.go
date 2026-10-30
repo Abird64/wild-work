@@ -292,12 +292,14 @@ func TestBuildFeesChannels(t *testing.T) {
 //
 // 例外：旧 Qoder（QoderWork）已从界面下线（路由保留供存量账号用），故显式豁免。
 func TestFeeChannelOrderCoversAllKinds(t *testing.T) {
-	all := []provider.Kind{
-		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.TraeCode,
-		provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM,
-		provider.MonkeyCode, provider.Raccoon, provider.Loomy, provider.Oczen, provider.Cline,
-		provider.Qoder, // 已下线，仅存量路由保留
-	}
+	// 渠道全集取自 provider.AllKinds()，**不再手抄**。
+	//
+	// 原实现手写了 14 项清单（实测当时已有 23 个 Kind）：
+	// 漏掉的 Cline/MonkeyCode/Raccoon/Loomy/Oczen/Kilo/Minimax/LobsterAI/ZCode/Gemini/CodeArts/
+	// OfficeAce/Doubao/Doubaowork 全都不在清单里 ⇒ 这条「全覆盖」断言覆盖不了它们，
+	// 新增渠道漏登 feeChannelOrder 时它照样是绿的（闸门名存实亡）。
+	// 手抄清单本身就是「同一概念写两遍」的再现，故改为从唯一真相源派生。
+	all := provider.AllKinds()
 	inOrder := map[provider.Kind]bool{}
 	for _, k := range feeChannelOrder {
 		inOrder[k] = true
@@ -305,6 +307,10 @@ func TestFeeChannelOrderCoversAllKinds(t *testing.T) {
 	for _, k := range all {
 		if k == provider.Qoder {
 			continue // 旧 Qoder 已下线，不应出现在面板
+		}
+		// 豆包两渠道走 CDP、无模型目录接口，属已知无模型面（不是漏登）。
+		if k == provider.Doubao || k == provider.Doubaowork {
+			continue
 		}
 		if !inOrder[k] {
 			t.Errorf("渠道 %s 未登记进 feeChannelOrder ⇒ 费率面板不会出现该渠道 tab", k)

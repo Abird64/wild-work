@@ -1,7 +1,6 @@
 package app
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -118,10 +117,8 @@ func TestRefreshTokenMissing(t *testing.T) {
 //     确认调用后行为符合预期——特别是不允许出现 `unknown login provider`。
 //     （其余渠道会真的去起登录流程，这里只做第 1 层的源码比对。）
 func TestReloginChannelSetMatchesBackend(t *testing.T) {
-	js, err := os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读 app.js 失败：%v", err)
-	}
+	// B6-3：读整包前端源码（index.html 的 script 顺序）。
+	js := []byte(webSource(t))
 	m := regexp.MustCompile(`const RELOGIN_CHANNELS = new Set\(\[([^\]]*)\]\)`).FindSubmatch(js)
 	if m == nil {
 		t.Fatal("未能在 app.js 里定位 RELOGIN_CHANNELS")
@@ -134,11 +131,9 @@ func TestReloginChannelSetMatchesBackend(t *testing.T) {
 		t.Fatalf("RELOGIN_CHANNELS 解析出 %d 个渠道，疑似解析失败：%v", len(channels), channels)
 	}
 
-	appGo, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败：%v", err)
-	}
-	_ = appGo // 2026-10-18 收表后不再做源码文本比对，改用运行时查表（见下）。
+	// 2026-10-18 收表后不再做源码文本比对，改用运行时查表（见下）；
+	// 2026-10-29（B6-0）删掉遗留的 `os.ReadFile("app.go")` 死读取 —— 它读了就丢，
+	// 唯一效果是给 app.go 这个文件名再加一处无意义耦合。
 
 	// 第 1 层（改造后更可靠）：前端每个 ⟳ 成员都必须在后端单一来源表里**有可用入口**。
 	// 改造前这里比对源码文本里「有没有出现过 provider.X」，位置盲、也分不清空壳 case；
@@ -229,12 +224,10 @@ func TestAccountViewCarriesRefreshTokenMissing(t *testing.T) {
 	// 前端契约：app.js 读的字段名必须与 Go 侧 json tag 一致（历史上多次因改名而两边脱节）。
 	// 判据取源码文本（同 monkeycode/loomy 的既有做法），避免「改了 tag 忘了前端」这类
 	// 只在运行时才暴露的问题。
-	src, err := os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读 app.js 失败：%v", err)
-	}
+	// B6-3：读整包前端源码（index.html 的 script 顺序）。
+	src := webSource(t)
 	for _, key := range []string{"refresh_token_missing", "refresh_token_missing_reason"} {
-		if !strings.Contains(string(src), key) {
+		if !strings.Contains(src, key) {
 			t.Errorf("app.js 未引用字段 %q（Go 侧 json tag 与前端脱节）", key)
 		}
 	}

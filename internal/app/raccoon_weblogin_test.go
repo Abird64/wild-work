@@ -26,10 +26,8 @@ import (
 // 现在拆分职责：结构性问题（空壳 case / 串写覆盖）归 login_branch_ast_test.go 用 AST 判定；
 // 本测试只保留独有职责 —— R44 的「不得回退到桌面协议回调」。
 func TestRaccoonLoginUsesWebFlow(t *testing.T) {
-	src, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败: %v", err)
-	}
+	// B6-0：读整包（app.go 已拆分）。
+	src := pkgSource(t)
 	// 去行注释后再扫：本文件里刻意保留了描述旧缺陷的注释（教训留档），
 	// 不能让注释里的字样参与断言（同 TestRaccoonUIDExtractionSingleSourceOfTruth 的做法）。
 	var live []string
@@ -94,12 +92,10 @@ func TestRaccoonUIDExtractionSingleSourceOfTruth(t *testing.T) {
 	}
 
 	// ② 登录落盘与导入路径都必须委托给它，不得自行读 name/sub claim。
-	for _, f := range []string{"app.go", "import_local.go"} {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("读 %s 失败：%v", f, err)
-		}
-		code := string(b)
+	// 2026-10-29（B6-0）：原来逐个读 {"app.go","import_local.go"}；拆分后改为对**整包**断言，
+	// 语义不变（仍覆盖登录落盘与导入两条路径），且不再依赖文件布局。
+	{
+		code := string(pkgSource(t))
 		// 去行注释后再扫，避免注释里提到旧写法（教训留档）被误判。
 		var live []string
 		for _, ln := range strings.Split(code, "\n") {
@@ -110,10 +106,10 @@ func TestRaccoonUIDExtractionSingleSourceOfTruth(t *testing.T) {
 		}
 		src := strings.Join(live, "\n")
 		if !strings.Contains(src, "raccoon.JWTUID(") {
-			t.Errorf("❌ %s 未调用 raccoon.JWTUID 提取小浣熊 uid（会漏新版 OIDC 的 sub）", f)
+			t.Error("❌ 本包未调用 raccoon.JWTUID 提取小浣熊 uid（会漏新版 OIDC 的 sub）")
 		}
 		if strings.Contains(src, "jwtClaim(") {
-			t.Errorf("❌ %s 仍在自行解析 JWT claim 取 uid（应统一走 raccoon.JWTUID，否则新版 sub 形态会漏）", f)
+			t.Error("❌ 本包仍在自行解析 JWT claim 取 uid（应统一走 raccoon.JWTUID，否则新版 sub 形态会漏）")
 		}
 	}
 }

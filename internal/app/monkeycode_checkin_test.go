@@ -53,12 +53,10 @@ func TestMonkeyCodeCheckinWiring(t *testing.T) {
 	}
 
 	// ③ 前端：NO_EXPLICIT_CHECKIN 不得再包含 "monkeycode"。
-	jsSrc, err := os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读 app.js 失败: %v", err)
-	}
-	if strings.Contains(string(jsSrc), `NO_EXPLICIT_CHECKIN = new Set([`) &&
-		setLiteralContains(string(jsSrc), "NO_EXPLICIT_CHECKIN", "monkeycode") {
+	// B6-3：读整包前端源码（index.html 的 script 顺序），不绑定单个文件名。
+	jsSrc := webSource(t)
+	if strings.Contains(jsSrc, `NO_EXPLICIT_CHECKIN = new Set([`) &&
+		setLiteralContains(jsSrc, "NO_EXPLICIT_CHECKIN", "monkeycode") {
 		t.Error("❌ app.js 的 NO_EXPLICIT_CHECKIN 仍含 \"monkeycode\" —— 前端签到按钮会被置灰")
 	}
 }

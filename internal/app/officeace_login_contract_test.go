@@ -25,18 +25,11 @@ var oaFrontendStatusKeys = []string{"status", "nickname", "error"}
 // 前端会当成终态并停止轮询的值（其余值一律视为「进行中」）。
 var oaFrontendTerminalStates = []string{"done", "failed", "expired", "canceled", "idle"}
 
+// readAppJS 返回整份前端源码（B6-3：app.js 已拆成 21 个 app-*.js，
+// 以 index.html 的 <script src> 顺序拼接，见 websrc_test.go 的 webSource）。
 func readAppJS(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile("../wild-work/web/app.js")
-	if err == nil {
-		return string(raw)
-	}
-	// 包目录相对路径在 CI 的 cwd 下可能不同，直接按仓库布局再试一次。
-	raw, err = os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读前端 app.js 失败（签名变化会让本测试静默失效）：%v", err)
-	}
-	return string(raw)
+	return webSource(t)
 }
 
 func TestOfficeAceStatusKeysMatchFrontend(t *testing.T) {

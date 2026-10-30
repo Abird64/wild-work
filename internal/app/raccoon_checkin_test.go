@@ -68,10 +68,8 @@ func TestRaccoonCheckinWiring(t *testing.T) {
 	}
 
 	// ③ 登录与导入两条添加路径都必须做首次签到（否则新账号要等下一个签到时刻才落账）。
-	appSrc, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败: %v", err)
-	}
+	// B6-0：读整包（app.go 已拆分）。
+	appSrc := pkgSource(t)
 	if !strings.Contains(string(appSrc), "a.firstCheckinRaccoon(") {
 		t.Error("❌ app.go 未调用 firstCheckinRaccoon —— 网页版登录后不做首次签到")
 	}

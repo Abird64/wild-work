@@ -1,7 +1,6 @@
 package app
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -36,10 +35,8 @@ func TestGLMDisplayURLDoesNotFakeSuccess(t *testing.T) {
 	}
 
 	// ② 后端接口必须下发 needs_poll（否则前端又只能靠「URL 非空」猜）。
-	src, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败: %v", err)
-	}
+	// B6-0：app.go 已拆成 18 个文件，读整包（见 testsrc_test.go 的 pkgSource）。
+	src := pkgSource(t)
 	if !strings.Contains(string(src), `"needs_poll"`) {
 		t.Error("❌ /api/login/start 未下发 needs_poll —— 前端无法区分「真登录」与「只给链接」")
 	}
@@ -57,11 +54,9 @@ func TestGLMDisplayURLDoesNotFakeSuccess(t *testing.T) {
 	}
 
 	// ③ 前端必须真的读了它，且在不轮询的分支里 return（不能落回 startLoginPoll）。
-	js, err := os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读 app.js 失败: %v", err)
-	}
-	jsSrc := string(js)
+	// B6-3：前端已拆成 21 个 app-*.js，按 index.html 的 <script src> 顺序读整包
+	// （webSource 见 websrc_test.go；新增前端文件不需要再改本测试）。
+	jsSrc := webSource(t)
 	if !strings.Contains(jsSrc, "r.needs_poll") {
 		t.Error("❌ app.js 未读取 needs_poll —— 仍会为 GLM 启轮询（H9 假成功）")
 	}

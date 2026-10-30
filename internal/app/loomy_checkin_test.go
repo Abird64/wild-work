@@ -53,11 +53,8 @@ func TestLoomyCheckinWiring(t *testing.T) {
 	}
 
 	// ③ 前端名单：NO_EXPLICIT_CHECKIN 不得再包含 "loomy"。
-	js, err := os.ReadFile("../../cmd/wild-work/web/app.js")
-	if err != nil {
-		t.Fatalf("读 app.js 失败: %v", err)
-	}
-	if setLiteralContains(string(js), "NO_EXPLICIT_CHECKIN", "loomy") {
+	// B6-3：读整包前端源码（index.html 的 script 顺序），不绑定单个文件名。
+	if setLiteralContains(webSource(t), "NO_EXPLICIT_CHECKIN", "loomy") {
 		t.Error("❌ app.js 的 NO_EXPLICIT_CHECKIN 仍含 \"loomy\" —— 前端签到按钮会被置灰")
 	}
 
@@ -82,10 +79,8 @@ func TestLoomyCheckinWiring(t *testing.T) {
 	}
 
 	// ⑤ 登录/导入收尾必须做一次首次签到（否则新账号要等到下一个签到时刻才落账）。
-	appSrc, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败: %v", err)
-	}
+	// B6-0：读整包（app.go 已拆分）。
+	appSrc := pkgSource(t)
 	if !strings.Contains(string(appSrc), "a.firstCheckinLoomy(") {
 		t.Error("❌ app.go 未调用 firstCheckinLoomy —— Loomy 登录成功后不做首次领取")
 	}

@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"testing"
 )
 
@@ -29,10 +28,8 @@ import (
 //  1. 必须存在单一来源表（loginFlows）；
 //  2. 登录链路的 4 个函数体内，**不得**再出现按 provider.X 分支的 switch。
 func TestLoginCapabilitySingleSource(t *testing.T) {
-	src, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go 失败: %v", err)
-	}
+	// B6-0：读整包源码（app.go 已拆成 18 个文件）。结构不变量与文件布局无关。
+	src := pkgSource(t)
 
 	// ① 单一来源表必须存在。
 	if !containsTable(src) {

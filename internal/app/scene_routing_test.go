@@ -889,10 +889,8 @@ func TestSceneRoutingIdempotentDeepEqual(t *testing.T) {
 // 为测试加一个可替换的 Save 变量等于为了测试改生产结构。函数体是稳定的、可解析的，
 // 且这条不变量（一次事务 = 一次落盘）本来就是结构性的。
 func TestSceneRoutingSavesExactlyOnce(t *testing.T) {
-	src, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("读 app.go: %v", err)
-	}
+	// B6-0：读整包（app.go 已拆分；pkgSource 带文件哨兵，funcBody 在哨兵处停）。
+	src := pkgSource(t)
 	body := funcBody(t, string(src), "func (a *App) SetSceneRouting(")
 	if n := strings.Count(body, "config.Save("); n != 1 {
 		t.Errorf("SetSceneRouting 里 config.Save 出现 %d 次，必须恰好 1 次"+
@@ -909,6 +907,11 @@ func TestSceneRoutingSavesExactlyOnce(t *testing.T) {
 // funcBody 粗解析出某个函数声明起到下一个顶层 `func ` 之间的源码片段（含嵌套大括号）。
 // 刻意用「下一个 func 声明」而不是括号配平：Go 源码里函数体内不会有顶层 func 声明，
 // 这个判据足够稳，且比手写括号扫描更不容易出错。找不到声明直接 fail。
+//
+// 2026-10-29（B6-0）：src 来自 pkgSource(t)，是**多个文件**拼成的文本。若被断言函数是
+// 某个文件的最后一个声明，它后面紧跟的是 pkgFileSentinel 分隔行 + 下一个文件的类型/变量，
+// 而不是 `func ` —— 那样本函数会一路吃到下一个文件的第一个函数，把别人的声明吞进"函数体"，
+// 让 Count 类断言**假绿**。故在文件哨兵处也停（取更早的那个边界）。
 func funcBody(t *testing.T, src, decl string) string {
 	t.Helper()
 	i := strings.Index(src, decl)
@@ -916,10 +919,14 @@ func funcBody(t *testing.T, src, decl string) string {
 		t.Fatalf("找不到函数声明 %q", decl)
 	}
 	rest := src[i:]
-	if j := strings.Index(rest[1:], "\nfunc "); j >= 0 {
-		return rest[:j+1]
+	end := len(rest)
+	if j := strings.Index(rest[1:], "\nfunc "); j >= 0 && j+1 < end {
+		end = j + 1
 	}
-	return rest
+	if j := strings.Index(rest, "\n"+pkgFileSentinel); j >= 0 && j < end {
+		end = j
+	}
+	return rest[:end]
 }
 
 // ---------------------------------------------------------------------------
