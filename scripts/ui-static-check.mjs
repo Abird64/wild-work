@@ -1,14 +1,27 @@
-// ui-static-check.mjs —— 前端静态验证：把假 state 喂给 app.js 的渲染函数，断言 HTML 输出。
+// ui-static-check.mjs —— 前端静态验证：把假 state 喂给前端渲染函数，断言 HTML 输出。
 //
 // 为什么这样做（而不是起真实例）：
 //   - 仓库无 JS 测试设施、也无浏览器环境；起真实例会连上游（签到/保活有副作用）；
 //   - 我们只关心「函数拿到 state 会不会渲染出该有的 DOM」，纯函数级验证足够；
-//   - app.js 顶层有 `let state = null`，故用「源码改写注入」把假 state 塞进去。
+//   - 前端脚本顶层有 `let state = null`，故用「源码改写注入」把假 state 塞进去。
 //
-// 用法：node ui-static-check.mjs
+// 前端已拆成多个 classic <script>（无构建链，见 docs/refactor/03-web.md）：
+//   `raw` 不再是单个 app.js，而是**按 index.html 的 <script src> 顺序拼接**的全部脚本
+//   —— 也就是浏览器实际执行的那一份代码。文件清单只有 index.html 一处，不另设列表。
+//   下文断言标题里提到的「app.js」一律指这份「前端脚本集合」，不是某个具体文件。
+//   另有一个场景 10 用 vm 逐 script 求值，专抓「跨文件加载顺序」类错误（拼接求值抓不到）。
+//
+// 用法：node scripts/ui-static-check.mjs
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
-const raw = readFileSync(new URL("../cmd/wild-work/web/app.js", import.meta.url), "utf8");
+// 前端已按「无构建链」拆成多个 classic <script>（见 docs/refactor/03-web.md）。
+// 单源清单就是 index.html 的 <script src> 顺序：这里不做第二份文件列表，避免两处漂移。
+// raw 仍是「浏览器实际执行的那一份代码」的按序拼接——所有文本/正则断言因此语义不变。
+const _webDir = new URL("../cmd/wild-work/web/", import.meta.url);
+const _htmlManifest = readFileSync(new URL("index.html", _webDir), "utf8");
+const JS_FILES = [..._htmlManifest.matchAll(/<script src="\.\/([A-Za-z0-9_.-]+\.js)"><\/script>/g)].map((m) => m[1]);
+const raw = JS_FILES.map((f) => readFileSync(new URL(f, _webDir), "utf8")).join("\n");
 
 // 把 `let state = null;` 改成假数据，并暴露待测函数（app.js 是脚本，函数是顶层声明）。
 const FAKE_STATE = {
@@ -281,7 +294,7 @@ check("重新登录入口的 title 点明缺 refresh_token 场景",
 // 抓到的死按钮就是这个。这条断言把「卡片 ⟳ → startLogin → 分派到 OfficeAce 专属入口」
 // 这段接线锁住（真正的端到端对齐在 Go 侧 TestReloginChannelSetMatchesBackend）。
 {
-  const appSrc = readFileSync(new URL("../cmd/wild-work/web/app.js", import.meta.url), "utf8");
+  const appSrc = raw; // 与 raw 同一份（按 index.html 顺序拼接的全部前端脚本）
   check("startLogin 对 officeace 分派到专属入口（防死按钮复发）",
     /if \(channel === "officeace"\) return startOfficeAceWebLogin\(\);/.test(appSrc));
   check("OfficeAce 专属入口打的是 officeace_auto 端点（而非 /api/login/start）",
@@ -2659,6 +2672,126 @@ const LIVE_FB = [
   }
 
   for (const [label, pass, extra] of needPal) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
+    if (!pass) failed++;
+  }
+}
+
+// ---- 场景 10：加载顺序冒烟（vm 逐 script 求值，共享全局）----
+// 为什么需要它：`raw` 是把所有脚本拼成**一个函数作用域**求值的（见文件头），
+// 函数声明在那里被整体提升 ⇒ 任何「跨 script 的顺序错误」都被抹平。
+// 而浏览器里每个 <script> 是独立的顶层作用域：靠前的脚本调用靠后的声明会当场炸。
+// 实测过的真实形态：init() 同步前缀调 bindMainTabs()，若 init 的脚本排在 app-home.js
+// 之前 → ReferenceError: bindMainTabs is not defined → 整块面板空白。
+// 本场景用 vm.createContext 造一个真·共享全局，按 index.html 的顺序**逐脚本**求值。
+{
+  const needLoad = [];
+  const checkLoad = (name, pass, extra = "") => needLoad.push([name, pass, extra]);
+
+  const mkEl = () => ({
+    innerHTML: "", textContent: "", value: "", id: "", className: "", title: "", type: "",
+    checked: false, disabled: false, style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    scrollTop: 0, scrollHeight: 100, clientHeight: 50, offsetWidth: 0, offsetHeight: 0,
+    querySelector: () => mkEl(), querySelectorAll: () => [],
+    appendChild() {}, removeChild() {}, insertBefore() {}, remove() {}, cloneNode: () => mkEl(),
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    closest: () => null, focus() {}, blur() {}, click() {},
+    getAttribute: () => null, setAttribute() {}, removeAttribute() {}, hasAttribute: () => false,
+    getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 }),
+  });
+  const elCache = new Map();
+  const el = (id) => { const k = String(id); if (!elCache.has(k)) elCache.set(k, mkEl()); return elCache.get(k); };
+  const doc = {
+    getElementById: (id) => el(id),
+    querySelector: () => mkEl(),
+    querySelectorAll: () => [],
+    createElement: () => mkEl(),
+    addEventListener() {}, removeEventListener() {},
+    body: mkEl(), documentElement: mkEl(), head: mkEl(), readyState: "complete",
+  };
+  const sandbox = {
+    document: doc, console,
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
+      location: { search: "", href: "http://127.0.0.1/" } },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" }),
+    location: { search: "", href: "http://127.0.0.1/" },
+    navigator: { userAgent: "node", clipboard: { writeText: async () => {} } },
+    getComputedStyle: () => ({ getPropertyValue: () => "" }),
+    setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+    Event: class {}, CustomEvent: class {}, URL, URLSearchParams, TextDecoder, TextEncoder,
+    AbortController, structuredClone, alert() {}, confirm: () => true, prompt: () => null,
+  };
+  sandbox.globalThis = sandbox;
+  const vctx = vm.createContext(sandbox);
+
+  const texts = JS_FILES.map((f) => readFileSync(new URL(f, _webDir), "utf8"));
+  const rejections = [];
+  const onRej = (e) => rejections.push(e);
+  process.on("unhandledRejection", onRej);
+  const loadErrors = [];
+  for (let i = 0; i < JS_FILES.length; i++) {
+    try { vm.runInContext(texts[i], vctx, { filename: JS_FILES[i] }); }
+    catch (e) { loadErrors.push(`${JS_FILES[i]}: ${e.constructor.name}: ${e.message}`); }
+    // init 的异步前缀要跑完才看得到它的错：每个脚本后让一轮宏任务落地
+    await new Promise((r) => setImmediate(r));
+  }
+  process.off("unhandledRejection", onRej);
+  const isRefErr = (e) => e instanceof Error && (e.name === "ReferenceError"
+    || /is not defined|before initialization|Cannot access /.test(String(e.message || "")));
+  const refErrors = rejections.filter(isRefErr).map((e) => String(e.message));
+
+  checkLoad(`逐 script 求值无异常（${JS_FILES.length} 个脚本）`, loadErrors.length === 0, loadErrors.join(" | "));
+  checkLoad("加载期间无 ReferenceError（跨 script 的绑定/顺序）", refErrors.length === 0, refErrors.join(" | "));
+
+  const visible = ["bind", "bindMainTabs", "bindUsage", "render", "loadState", "api"];
+  const missing = visible.filter((n) => {
+    try { return vm.runInContext(`typeof ${n}`, vctx) !== "function"; } catch (e) { return true; }
+  });
+  checkLoad("关键函数在全部脚本加载后可见（bind/bindMainTabs/bindUsage/render/loadState/api）",
+    missing.length === 0, `缺 ${missing.join(", ")}`);
+
+  // init 所调用的每个函数，都必须在 init 所在脚本「之前或同文件」已声明——
+  // 这是唯一能提前发现「靠前脚本调用靠后声明」的判据（浏览器里就是 ReferenceError）。
+  const declAt = new Map();
+  const reFn = new RegExp("^(?:async\\s+)?function\\s+([A-Za-z_$][A-Za-z0-9_$]*)", "gm");
+  const reVar = new RegExp("^(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)", "gm");
+  for (let i = 0; i < texts.length; i++) {
+    for (const m of texts[i].matchAll(reFn)) if (!declAt.has(m[1])) declAt.set(m[1], i);
+    for (const m of texts[i].matchAll(reVar)) if (!declAt.has(m[1])) declAt.set(m[1], i);
+  }
+  const initIdx = texts.findIndex((t) => t.includes("(async function init("));
+  let callViolations = [];
+  if (initIdx < 0) {
+    callViolations = ["找不到 (async function init("];
+  } else {
+    const at = texts[initIdx].indexOf("(async function init(");
+    const open = texts[initIdx].indexOf("{", at);
+    let depth = 0, end = -1;
+    for (let i = open; i < texts[initIdx].length; i++) {
+      if (texts[initIdx][i] === "{") depth++;
+      else if (texts[initIdx][i] === "}" && --depth === 0) { end = i; break; }
+    }
+    const body = end > 0 ? texts[initIdx].slice(open, end + 1) : "";
+    const called = new Set([...body.matchAll(new RegExp("(?<![\\w$.])([A-Za-z_$][A-Za-z0-9_$]*)\\s*\\(", "g"))]
+      .map((m) => m[1]));
+    callViolations = [...called]
+      .filter((n) => declAt.has(n) && declAt.get(n) > initIdx)
+      .map((n) => `${n} 声明在 ${JS_FILES[declAt.get(n)]}`);
+  }
+  checkLoad("init 调用的每个函数都已在其之前（或同文件）声明", callViolations.length === 0, callViolations.join(" | "));
+
+  checkLoad("init 位于最后一个 <script>", initIdx === texts.length - 1, `init 在 #${initIdx + 1}/${texts.length}`);
+
+  const noStrict = JS_FILES.filter((f, i) => {
+    const stripped = texts[i].replace(/^(?:[ \t]*\/\/[^\n]*\n)+/, "").replace(/^[ \t]+/, "");
+    return !stripped.startsWith('"use strict";') && !stripped.startsWith("'use strict';");
+  });
+  checkLoad('每个前端脚本都以 "use strict" 开头', noStrict.length === 0, noStrict.join(", "));
+
+  for (const [label, pass, extra] of needLoad) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
     if (!pass) failed++;
   }

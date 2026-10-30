@@ -36,6 +36,8 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/devdump"
+	"wild-work/internal/doubao"
+	"wild-work/internal/doubaowork"
 	"wild-work/internal/gateway"
 	"wild-work/internal/gemini"
 	"wild-work/internal/glm"
@@ -46,8 +48,6 @@ import (
 	"wild-work/internal/loopguard"
 	"wild-work/internal/minimax"
 	"wild-work/internal/monkeycode"
-	"wild-work/internal/doubao"
-	"wild-work/internal/doubaowork"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
@@ -679,12 +679,12 @@ func main() {
 		// doubao（普通对话）：已接每日签到（landing/checkin），调度器只排签到、不排保活。
 		provider.Doubao:     {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp, Scheduler: dbChatSch},
 		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp, Scheduler: dbWorkSch},
-		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
-		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
-		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
-		provider.ZCode:       {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
-		provider.Gemini:      {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
-		provider.CodeArts:    {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
+		provider.Kilo:       {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
+		provider.Minimax:    {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
+		provider.LobsterAI:  {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.ZCode:      {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
+		provider.Gemini:     {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
+		provider.CodeArts:   {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
 	}
 
 	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir, upstreamTimeout)
@@ -745,8 +745,8 @@ func main() {
 		SoftCooldown:     cfg.SoftRateDur,
 		ErrThreshold:     cfg.Cooldown.ErrThresh,
 		ErrCooldown:      cfg.ErrCooldownDur,
-		ModelFallbacks:   cfg.ModelFallback,    // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
-		ReasoningEfforts: cfg.ReasoningEfforts, // 启动时载入思考强度映射（同上）
+		ModelFallbacks:   cfg.ModelFallback,                        // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
+		ReasoningEfforts: cfg.ReasoningEfforts,                     // 启动时载入思考强度映射（同上）
 		MaxRequestBody:   int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
 		WebUI:            sub,
 		AttachAPI:        appInst.HandleAPI,
@@ -779,6 +779,9 @@ func main() {
 			Channels: gateway.SortChannels(currentChannels()),
 		},
 		MaxTokensCap: cfg.Compat.MaxTokensCap,
+		// 读写上限由装配层注入：内层上限可被 NewHandler 按 server.max_request_body_mb
+		// 覆盖（R114），故传 thunk 每次取值；兼容层不再直接读 server 的包级可变全局。
+		MaxInnerBody: func() int64 { return server.MaxRequestBody },
 	})
 	// 内层 handler 的别名表（`compat.model_map` 的正本）：让别名对
 	// /v1/chat/completions 也生效（MS-006）。外层三个兼容端点由上面的
@@ -843,44 +846,20 @@ func main() {
 	// 调度器后台运行
 	sctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	go wbSch.Run(sctx)
-	go trSch.Run(sctx)
-	go qdSch.Run(sctx)
-	go wbaSch.Run(sctx)
-	go qwSch.Run(sctx)
-	go qcnSch.Run(sctx)
-	go qcmSch.Run(sctx)
-	go mcSch.Run(sctx)
-	go rcSch.Run(sctx)
-	go lmSch.Run(sctx)
-	go ocSch.Run(sctx)
-	// ⚠️ 新增渠道时必须在这里补 Run()。
-	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
+	// 表驱动启动所有渠道调度器：只要渠道进了 appRuntimes 且配了 Scheduler，就自动 Run。
+	//
+	// 为什么改成表驱动（R34 的根治）：旧写法是 22 行手抄的 `go xxxSch.Run(sctx)`，
+	// 漏一行**不报错、不崩溃**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
-	go glmSch.Run(sctx)
-	// Cline 的 Run 同样不可漏（R34：漏了不报错，只表现为该渠道定时逻辑从不运行）。
-	// 本渠道任务全关，Run 只会阻塞等 ctx/配置变更，但缺了它将来加任务即静默失效。
-	go clSch.Run(sctx)
-	// OfficeAce 的 Run 不可漏（R34）：本渠道有签到与保活。
-	go oaSch.Run(sctx)
-	// 豆包 / 豆包工作的 Run 不可漏（R34）：两渠道现有每日签到（无保活）。
-	// 漏了不会报错，只会「签到按钮点了没反应 + 定时任务静默不跑」——
-	// 正是 scheduler_start_test 守护的那类缺陷。
-	go dbChatSch.Run(sctx)
-	go dbWorkSch.Run(sctx)
-	// kilo 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
-	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
-	go kiSch.Run(sctx)
-	// MiniMax 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
-	go mimSch.Run(sctx)
-	// LobsterAI 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
-	go lobSch.Run(sctx)
-	// ZCode 的 Run 同样不可漏（R34）：本渠道当前无定时任务，但漏了将来加任务即静默失效。
-	go zcdSch.Run(sctx)
-	// Gemini 的 Run 不可漏（R34）：本渠道有 token 保活任务。
-	go gemSch.Run(sctx)
-	// CodeArts 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
-	go caSch.Run(sctx)
+	// 历史上 glm 就是这么漏的（2026-09-27 用户手工签到后才发现）。
+	// 现在唯一触点变成 appRuntimes 字面量里的 `Scheduler: xxxSch`——新增渠道只要
+	// 注册运行时就会自动启动，漏接在结构上不可能发生；仍有
+	// TestAllSchedulersAreStarted 静态守住「每个 scheduler.New 都进了某条运行时」。
+	for _, rt := range appRuntimes {
+		if rt.Scheduler != nil {
+			go rt.Scheduler.Run(sctx)
+		}
+	}
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
