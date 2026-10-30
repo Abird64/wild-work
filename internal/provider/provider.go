@@ -123,11 +123,23 @@ func (k Kind) String() string { return string(k) }
 // ② 自定义渠道**可以**用它当名字，于是面板打自定义池、对话走内建渠道，静默错路由。
 // 2026-10-29 实测踩过：`doubao` / `doubaowork` 漏列，导致这两个已上线渠道提交三场景时 400。
 // 护栏见 `TestBuiltinKindsCoversAllKindConsts`（漏列即红），**新增 Kind 常量时必须同步这里**。
+// AllKinds 返回全部内建渠道 kind 的**有序**清单（唯一来源）。
+//
+// 这是「有哪些渠道」在 Go 侧的唯一真相源：BuiltinKinds() 由它派生，面板/费率/统计
+// 各处若需要穷举渠道，一律从这里取，不要再手抄第二份清单。
+//
+// 顺序 = 声明顺序（面板默认展示顺序的偏好序）。新增 Kind 常量时**只需**在这里加一项，
+// 护栏见 TestBuiltinKindsCoversAllKindConsts（漏列即红）与
+// internal/app 的 TestAllKindsOrderTablesConsistent。
+func AllKinds() []Kind {
+	return []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
+		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
+		Gemini, CodeArts, ZCode, Doubao, Doubaowork}
+}
+
 func BuiltinKinds() map[string]bool {
 	m := map[string]bool{}
-	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
-		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-		Gemini, CodeArts, ZCode, Doubao, Doubaowork} {
+	for _, k := range AllKinds() {
 		m[k.String()] = true
 	}
 	for ns := range ModelNamespaces {

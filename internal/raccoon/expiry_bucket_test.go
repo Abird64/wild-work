@@ -14,8 +14,17 @@ import (
 // ⇒ 面板小浣熊「今日到期 / 明日到期 / 7 日内到期」三列恒为「—」，
 // 而实际有 2100 分（7×300）全在 7 天内到期（2026-10-20 用户实测）。
 func TestDailyExpiryFeedsExpireBuckets(t *testing.T) {
-	now := time.Now()
+	// now 固定为「当天正午」，**不用 time.Now()**。
+	//
+	// 为什么（2026-10-30 实测踩到）：本用例把到期时刻设在当天 23:59:59，而
+	// provider.expireDayOf 判定前会先减去 expireMidnightGrace（5 分钟）——于是它把
+	// 23:54:59 与 now 比较。若真实时钟落在 23:55:00~23:59:59 这 5 分钟窗口内运行，
+	// 23:54:59 已经「早于 now」⇒ 判为已失效（ok=false）⇒ 三个桶全空，
+	// 断言「今日到期 = 300」必红。即每天有 5 分钟窗口确定性失败（与本渠道逻辑无关，
+	// 是测试用例自身的时间敏感缺陷；2026-10-29 23:58 首次暴露，次日 09:59 复跑通过）。
+	// 固定 now 后用例与运行时刻无关：正午距两个边界都足够远。
 	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, loc)
 	today := now.In(loc)
 
 	// 构造 7 笔逐日发放，第 i 笔在「今天 + i」日末失效。
@@ -68,8 +77,9 @@ func TestDailyExpiryFeedsExpireBuckets(t *testing.T) {
 // 「每日积分静态标注当日到期」），那是**编造**：7 笔发放有 7 个不同到期日，
 // 全报今日等于虚高 7 倍。
 func TestDailyExpiryNotAllToday(t *testing.T) {
+	// 同上：now 固定为当天正午，避免落在 23:55~23:59:59 的宽限窗口内导致判据漂移。
 	loc := time.FixedZone("UTC+8", 8*60*60)
-	now := time.Now()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, loc)
 	today := now.In(loc)
 	grants := make([]dailyGrant, 0, 7)
 	for i := 0; i < 7; i++ {

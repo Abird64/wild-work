@@ -80,13 +80,8 @@ jobs:
           OUT="dist/wild-work-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
           go build -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/wild-work
 
-      # 前端静态检查（脚本随仓库走，见 scripts/ui-static-check.mjs）：
-      # 断言冷却标签/汇总条渲染正确，且顶层函数/常量**不得重复定义**
-      # （曾出现 renderSummary 写了两版、前者成死代码，node --check 与功能测试都发现不了）。
-      # 只在单个矩阵项执行，避免 5 个平台重复跑。
-      - name: Frontend static check
-        if: matrix.name == 'linux-amd64'
-        run: node scripts/ui-static-check.mjs
+      # 前端静态检查已移到 verify job（纯静态断言，与编译产物无关，
+      # 放在矩阵里会与 5 个平台的条件判断纠缠，也让「闸门」散在两处）。
 
       # 文本文件末尾换行检查（**纯提示，不阻断构建**）。
       #
@@ -157,8 +152,51 @@ jobs:
           path: dist/WildWork-*-${{ matrix.goarch }}.dmg
           if-no-files-found: error
 
+  # 代码质量闸门（在发版之前拦，不在 5 个平台矩阵里重复跑）。
+  #
+  # 为什么需要这个 job：本仓有 502 个 Go 文件 / 5.7 万行测试，`go build` 只能证明
+  # 「能编译」，证明不了三件事——
+  #   ① 测试是绿的（`go test` 从没进过 CI）；
+  #   ② vet 是干净的（`go vet` 从没进过 CI）；
+  #   ③ 格式是统一的（`gofmt` 从没进过 CI，2026-10-29 实测存量 40 个文件不合规）。
+  # 结果是「本地全绿、CI 只验前端」——这盏灯此前只照前端，后端全靠人工自觉。
+  #
+  # `go test ./...` 实测约 2 分钟（含 cdp 18s / officeace 16s / app 13s），
+  # 相比 5 平台交叉编译的总耗时可以忽略，故不设缓存也不分片。
+  # release 依赖本 job ⇒ 测试红/格式脏时**不会发出正式包**。
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      # gofmt 是硬闸门而非 advisory：格式化不改变语义，没有「存量违规」的正当理由。
+      # 输出逐文件列出，避免只报一个数字还要本地复现。
+      - name: gofmt
+        run: |
+          out=$(gofmt -l . )
+          if [ -n "$out" ]; then
+            echo "以下文件未通过 gofmt，请执行 'gofmt -w \$文件' 后重新提交："
+            echo "$out"
+            exit 1
+          fi
+          echo "gofmt 干净"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      # 前端静态检查也归到闸门里（原先挂在 linux-amd64 的 build 矩阵项上）：
+      # 它是纯静态断言，与编译产物无关，放这里语义更准，且不受矩阵条件影响。
+      - name: Frontend static check
+        run: node scripts/ui-static-check.mjs
+
   release:
-    needs: build
+    needs: [build, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write
