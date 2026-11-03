@@ -20,8 +20,9 @@ import (
 type CoolKind int
 
 const (
-	CoolHard       CoolKind = iota // 余额不足 → 长冷却
-	CoolSoft                       // 429 → 短冷却
+	CoolUnknown    CoolKind = iota // 未知/旧版数据/未记录
+	CoolHard                       // 余额不足 → 长冷却
+	CoolSoft                       // 429 或频率限制 → 短冷却
 	CoolErr                        // 连续错误 → 中冷却
 	CoolLowBalance                 // 余额低于平均 60% → 15min 冷却
 )
@@ -57,7 +58,10 @@ type Status struct {
 	// 或尚未完成首次成功刷新。UI 应显示「待刷新」而非把旧值/0 当真值。
 	// 自动刷新循环首次成功写入后即清除。
 	CreditsStale   bool      `json:"credits_stale,omitempty"`
-	Cooling        bool      `json:"cooling"`
+	// CoolKind 冷却类别（仅展示与诊断，不参与 Pick() 路由）。
+	// 区分 402 余额不足（hard_credit）、429/软冷却（soft_rate）与异常连续错误（error_threshold）。
+	CoolKind string `json:"cool_kind,omitempty"`
+	Cooling  bool   `json:"cooling"`
 	Until          time.Time `json:"until,omitempty"`
 	Reason         string    `json:"reason,omitempty"`
 	Disabled       bool      `json:"disabled"`
@@ -99,6 +103,7 @@ type entry struct {
 	// 看起来像额度耗尽。窗口必须随 state 一起下发，卡片才不用为每个账号异步拉详情。
 	// 仅展示，不参与 Pick() 路由。
 	windows  []QuotaWindow
+	coolKind CoolKind
 	disabled bool
 	reason   string
 	until    time.Time
@@ -161,7 +166,8 @@ type accountState struct {
 	// Windows 百分比配额窗口（omitempty：老文件缺该字段 = 无窗口信息，按"待刷新"显示）。
 	// 不 bump stateVersion —— 与 earliest_expire 同一口径，缺字段时行为退化为展示空。
 	Windows           []QuotaWindow        `json:"quota_windows,omitempty"`
-	Disabled          bool                 `json:"disabled"`
+	CoolKind string `json:"cool_kind,omitempty"`
+	Disabled bool   `json:"disabled"`
 	Reason            string               `json:"reason,omitempty"`
 	Until             time.Time            `json:"until,omitempty"`
 	ModelCool         map[string]time.Time `json:"model_cooling,omitempty"`
@@ -343,13 +349,14 @@ func (p *Pool) SetCreditDetail(uid string, usable, expiring, unusable int64, ear
 	p.saveLocked()
 }
 
-// Cooldown 冷却账号至 now+d。
+// Cooldown 冷却账号至 now+d 并记录冷却类别。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.until = time.Now().Add(d)
 		e.reason = reason
+		e.coolKind = kind
 		e.errCount = 0
 	}
 	p.saveLocked()
@@ -366,6 +373,7 @@ func (p *Pool) ClearPenalty(uid string) {
 			return // 无惩罚可清：不触发无意义的落盘
 		}
 		e.until = time.Time{}
+		e.coolKind = CoolUnknown
 		e.errCount = 0
 		if !e.disabled {
 			e.reason = ""
@@ -413,6 +421,7 @@ func (p *Pool) CooldownModel(uid, model string, d time.Duration, reason string) 
 	if active >= 3 {
 		e.until = latest
 		e.reason = reason + "（多模型接连限流，升级整号冷却）"
+		e.coolKind = CoolSoft
 		e.errCount = 0
 		e.modelCool = nil
 		escalated = true
@@ -462,6 +471,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64, e
 		if remain > 0 && !e.disabled {
 			e.until = time.Time{}
 			e.reason = ""
+			e.coolKind = CoolUnknown
 			e.errCount = 0
 		}
 	}
@@ -637,6 +647,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 			mc[m] = t
 		}
 	}
+	var kindStr string
+	if !e.until.IsZero() && now.Before(e.until) && e.coolKind != CoolUnknown {
+		kindStr = e.coolKind.String()
+	}
 	return Status{
 		UID:               uid,
 		Nickname:          e.a.Nickname,
@@ -644,6 +658,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		ExpiringCredits:   e.expiring,
 		UnusableCredits:   e.unusable,
 		CreditsStale:      e.creditsStale,
+		CoolKind:          kindStr,
 		Cooling:           !e.until.IsZero() && now.Before(e.until),
 		Until:             e.until,
 		Reason:            e.reason,
@@ -679,6 +694,21 @@ func zeroOrUnix(t time.Time) int64 {
 	return t.Unix()
 }
 
+func parseCoolKind(s string) CoolKind {
+	switch s {
+	case "hard_credit":
+		return CoolHard
+	case "soft_rate":
+		return CoolSoft
+	case "error_threshold":
+		return CoolErr
+	case "low_balance":
+		return CoolLowBalance
+	default:
+		return CoolUnknown
+	}
+}
+
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {
@@ -700,6 +730,7 @@ func (p *Pool) load() {
 			unusable:          s.Unusable,
 			earliestExpire:    unixOrZero(s.EarliestExpireUnix),
 			windows:           s.Windows,
+			coolKind:          parseCoolKind(s.CoolKind),
 			creditsStale:      stale,
 			disabled:          s.Disabled,
 			reason:            s.Reason,
@@ -731,12 +762,17 @@ func (p *Pool) saveLocked() {
 				mc[m] = t
 			}
 		}
+		var kindStr string
+		if e.coolKind != CoolUnknown {
+			kindStr = e.coolKind.String()
+		}
 		sf.Accounts[uid] = accountState{
 			Credits:            e.credits,
 			Expiring:           e.expiring,
 			Unusable:           e.unusable,
 			EarliestExpireUnix: zeroOrUnix(e.earliestExpire),
 			Windows:            e.windows,
+			CoolKind:           kindStr,
 			Disabled:           e.disabled,
 			Reason:             e.reason,
 			Until:              e.until,

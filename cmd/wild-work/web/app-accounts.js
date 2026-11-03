@@ -23,17 +23,47 @@ function renderAccounts() {
     const disableIcon = a.disabled ? "▶" : "⏸";
     const disableTitle = a.disabled ? "启用" : "停用";
 
-    // 冷却标签（后端 pool.Status 已透出 cooling/until/reason，此前前端未渲染）。
-    // 为什么需要：账号被冷却时挑号会跳过它，表现为「积分明明很多却报 503/上游限流」,
-    // 而卡片上毫无提示——用户只能靠猜。这里把「冷却到几点 + 原因」直接摆出来。
-    // until 由后端 fmtTime 预格式化为 "01-02 15:04"（24h 制），为空则退化为「冷却中」。
-    // 24h 制歧义修复（如 10-18 07:07 是次日清晨，却极易被读成「19 点显示成 7 点」）：
-    // 后端同时透出 until_ts，这里实时算出「剩 X 时 X 分」并列展示，绝对时刻 +
-    // 相对时长双保险，跨零点不再误读；无 until_ts（旧后端）时退回纯文案，不破兼容。
+    // 冷却标签与类别（TP-006：区分余额不足/频率超限/连续错误三档原因及操作建议）。
+    let coolingKindLabel = "";
+    let coolingKindAction = "";
+    if (a.cooling) {
+      switch (a.cool_kind) {
+        case "hard_credit":
+          coolingKindLabel = "余额不足";
+          coolingKindAction = "建议充值或更换渠道，换模型无效";
+          break;
+        case "soft_rate":
+          coolingKindLabel = "频率受限";
+          coolingKindAction = "可稍后重试或切换其他模型";
+          break;
+        case "error_threshold":
+          coolingKindLabel = "连续异常";
+          coolingKindAction = "建议检查账号有效性或网络状况";
+          break;
+        case "low_balance":
+          coolingKindLabel = "低额度防刷";
+          coolingKindAction = "额度低于均值，进入保护冷却";
+          break;
+        default:
+          coolingKindLabel = "冷却中";
+          coolingKindAction = "原因未分类";
+      }
+    }
+    const coolingTitle = a.cooling
+      ? `${coolingKindLabel} · ${coolingKindAction}（${esc(a.reason || "")}）`
+      : "";
     const coolingTag = a.cooling
-      ? `<span class="tag warn" title="${esc(a.reason || "冷却中")}">冷却至 ${esc(a.until || "-")}${a.until_ts ? `<span data-until-ts="${a.until_ts}">（${fmtLeft(a.until_ts)}）</span>` : ""}</span>`
+      ? `<span class="tag warn cooling-kind-${a.cool_kind || "unknown"}" title="${esc(coolingTitle)}">${esc(coolingKindLabel)}至 ${esc(a.until || "-")}${a.until_ts ? `<span data-until-ts="${a.until_ts}">（${fmtLeft(a.until_ts)}）</span>` : ""}</span>`
       : "";
     const coolingClass = a.cooling ? " cooling" : "";
+
+    // 模型级冷却标签（TP-006：上游 429 按模型限流，账号未整号冻结时展现）
+    let modelCoolingTag = "";
+    if (!a.cooling && a.model_cooling && Object.keys(a.model_cooling).length > 0) {
+      const mcList = Object.entries(a.model_cooling);
+      const mcTitle = mcList.map(([m, u]) => `${m} 限流至 ${u}`).join("&#10;");
+      modelCoolingTag = `<span class="tag neutral model-cooling-tag" title="${esc(mcTitle)}">${mcList.length}模型限流中</span>`;
+    }
     const checkinBtn = noCheckin
       ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
@@ -110,7 +140,7 @@ function renderAccounts() {
       </div>
       <div class="acct-mid">
         <div class="acct-credits${noCredits ? "" : " clickable"}" data-uid="${a.uid}"${noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</div>
-        <div class="acct-checkin">${coolingTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
+        <div class="acct-checkin">${coolingTag}${modelCoolingTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
       </div>
     </div>`;
   }).join("");

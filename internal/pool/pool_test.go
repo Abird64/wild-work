@@ -92,8 +92,49 @@ func TestCooldownPersists(t *testing.T) {
 		t.Fatal("cooldown lost after reload")
 	}
 	st, ok := p2.Status("u1")
-	if !ok || st.Reason != "余额不足" {
+	if !ok || st.Reason != "余额不足" || st.CoolKind != "hard_credit" {
 		t.Errorf("status=%+v ok=%v", st, ok)
+	}
+}
+
+func TestCooldownKinds(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.Add(&auth.Auth{UID: "u3"})
+
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Cooldown("u2", CoolSoft, time.Hour, "429")
+	p.Cooldown("u3", CoolErr, time.Hour, "连续错误")
+
+	st1, _ := p.Status("u1")
+	st2, _ := p.Status("u2")
+	st3, _ := p.Status("u3")
+
+	if st1.CoolKind != "hard_credit" {
+		t.Errorf("st1.CoolKind = %q, want hard_credit", st1.CoolKind)
+	}
+	if st2.CoolKind != "soft_rate" {
+		t.Errorf("st2.CoolKind = %q, want soft_rate", st2.CoolKind)
+	}
+	if st3.CoolKind != "error_threshold" {
+		t.Errorf("st3.CoolKind = %q, want error_threshold", st3.CoolKind)
+	}
+
+	// 重新加载后验证持久化
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	p2.Add(&auth.Auth{UID: "u2"})
+	p2.Add(&auth.Auth{UID: "u3"})
+
+	r1, _ := p2.Status("u1")
+	r2, _ := p2.Status("u2")
+	r3, _ := p2.Status("u3")
+
+	if r1.CoolKind != "hard_credit" || r2.CoolKind != "soft_rate" || r3.CoolKind != "error_threshold" {
+		t.Errorf("reload failed: r1=%s r2=%s r3=%s", r1.CoolKind, r2.CoolKind, r3.CoolKind)
 	}
 }
 

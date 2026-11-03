@@ -283,6 +283,8 @@ body {
 /* 冷却标签 + 冷却卡片（账号被挑号跳过时给出可见提示，避免"积分很多却报错"的困惑） */
 .tag.warn { background: #2e2a18; color: var(--warn); }
 .acct-card.cooling { border-left: 3px solid var(--warn); }
+.model-cooling-tag { background: var(--raised); border: 1px dashed var(--warn); color: var(--warn); }
+
 
 /* 智谱清言弹层顶部风险告知（体验渠道） */
 .glm-warn {

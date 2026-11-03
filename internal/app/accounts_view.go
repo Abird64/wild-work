@@ -41,6 +41,7 @@ type AccountView struct {
 	// 积分刷新的同一次上游响应里（见 creditSnapshot），顺手存下来成本几乎为零。
 	QuotaWindows []QuotaWindowView `json:"quota_windows,omitempty"`
 	Cooling      bool              `json:"cooling"`
+	CoolKind     string            `json:"cool_kind,omitempty"`
 	Until        string            `json:"until"`
 	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」——
 	// until 文案是 "01-02 15:04"（24h 制），跨零点的次日 07:07 极易被误读成
@@ -217,6 +218,7 @@ func (a *App) accountViews() []AccountView {
 			CreditsUnit:               a.creditsUnit(group),
 			QuotaWindows:              quotaWindowViews(a.quotaWindows(group, s.UID)),
 			Cooling:                   s.Cooling,
+			CoolKind:                  s.CoolKind,
 			Until:                     fmtTime(s.Until),
 			UntilTS:                   unixOrZero(s.Until),
 			Reason:                    s.Reason,

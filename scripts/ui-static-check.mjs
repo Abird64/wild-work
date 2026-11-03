@@ -35,6 +35,7 @@ const FAKE_STATE = {
       expiring_credits: 0,
       unusable_credits: 0,
       cooling: true,
+      cool_kind: "hard_credit",
       until: "10-03 09:12",
       until_ts: Math.floor(Date.now() / 1000) + 12 * 3600, // 24h 制歧义修复：带相对时长
       reason: "stream business error: solo error code=3004 …",
@@ -264,20 +265,26 @@ const check = (name, pass, extra = "") => results.push([name, pass, extra]);
 // ---- 场景 1：账号卡片的冷却可见性 ----
 T.renderAccounts();
 const cards = document.getElementById("acctList").innerHTML;
-check("冷却标签出现（冷却至 …）", /冷却至/.test(cards));
+check("冷却标签出现（余额不足/冷却至 …）", /至 10-03 09:12/.test(cards));
 check("冷却时间正确显示", cards.includes("10-03 09:12"));
 check("冷却原因进 title（含 3004）", cards.includes("3004"));
+check("冷却类别进 title（含建议动作）", cards.includes("建议充值或更换渠道"));
 check("冷却卡片带 cooling 类（左侧琥珀边）", /acct-card cooling/.test(cards));
 check("冷却标签用 warn 样式", /tag warn/.test(cards));
 check("冷却时长并列展示（剩 X 时 X 分，消除跨零点误读）", /（剩 \d+ 时 \d+ 分）/.test(cards));
 check(
   "只有冷却账号带冷却标签（健康号不带）",
-  (cards.match(/冷却至/g) || []).length === 1,
-  `实际 ${(cards.match(/冷却至/g) || []).length} 个`
+  (cards.match(/至 10-03 09:12/g) || []).length === 1,
+  `实际 ${(cards.match(/至 10-03 09:12/g) || []).length} 个`
 );
 check("健康号仍在（未被过滤）", cards.includes("健康号"));
 
+// ---- 场景 1.1：冷却类别与模型级冷却透出（TP-006）----
+check("冷却标签带具体类别类名（.cooling-kind-hard_credit）", cards.includes("cooling-kind-hard_credit"));
+check("冷却标签显示对应中文类别（余额不足）", cards.includes("余额不足至 10-03 09:12"));
+
 // ---- 场景 1.5：OfficeAce「缺 refresh_token」持久徽标（2026-10-17 用户实测要求）----
+
 // 为什么要有这个徽标：客户端导入只拿得到不过期的网关 Basic，拿不到换临时凭据所需的
 // refresh_token ⇒ 积分/签到永久不可用，且**不会自愈**（不是 401 那种能被 refresh 救回的
 // 形态）。原先只在导入那一刻弹一次提示文字，事后无从复查；「需重新登录」徽标又只认
