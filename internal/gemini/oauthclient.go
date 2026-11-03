@@ -13,6 +13,7 @@
 package gemini
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -29,10 +30,80 @@ var (
 	reOAuthClientSecret = regexp.MustCompile(`GOCSPX-[A-Za-z0-9_\-]{20,}`)
 )
 
+// reOAuthPair 是**配对**匹配：一个 client_id 与紧随其后的 GOOGLE client_secret 组成一对。
+//
+// 为什么必须配对而不是「各取首个」（2026-10-30 实测量化）：
+// 官方 CLI 0.66.0 的 `bundle/chunk-HJ5KJXNZ.js` 里有**两个** client_id——
+//
+//	① 偏移 5649522 处是 google-auth-library 的 `CLOUD_SDK_CLIENT_ID`（无配对 secret）；
+//	② 偏移 12279769 处才是 `OAUTH_CLIENT_ID`，其后 102 字节就是 `OAUTH_CLIENT_SECRET`。
+//
+// 「按字典序遍历、各取首个命中」会取到 ① 的 id 与 ② 的 secret ⇒ 得到**从未配对过**的组合，
+// 授权页会直接回 `invalid_client`，而文案会误导成「凭据没配好」。故按「就近配对」取值：
+//
+//	client_id 与其后最多 pairWindow 字节内出现的 secret 视为一对。
+//
+// 全包三个副本实测：secret 到其配对 id 的距离恒为 102 字节，远小于 pairWindow，
+// 而 ①↔② 相距 660 万字节，不会被误配。
+
+// pairWindow 配对窗口（字节）：secret 与它前面最近的 client_id 相距不超过此值即视为一对。
+//
+// 实测 102 字节（官方 CLI 的三个副本一致），取 4096 留足格式变动余量：
+// 官方若改成 `client_id: "…",\n client_secret: "…"` 这种多行形式也不会掉出去。
+const pairWindow = 4096
+
+// findOAuthPair 在文本里找一对**就近配对**的 client_id + client_secret。
+//
+// 用位置配对而不是「正则一次匹配两枚」：Go 的 regexp 重复次数上限是 1000，
+// 写 `{0,4096}` 会直接 panic（本实现第一版就踩了）。位置法既不受该上限约束，
+// 也更容易解释判据。
+func findOAuthPair(s string) (id, secret string) {
+	idLocs := reOAuthClientID.FindAllStringIndex(s, -1)
+	secLocs := reOAuthClientSecret.FindAllStringIndex(s, -1)
+	if len(idLocs) == 0 || len(secLocs) == 0 {
+		return "", ""
+	}
+	for _, sec := range secLocs {
+		best := -1
+		for i, loc := range idLocs {
+			// 只认「id 在 secret 之前」的配对（官方形态是 id 先声明、secret 紧随其后）。
+			if loc[1] > sec[0] {
+				continue
+			}
+			gap := sec[0] - loc[1]
+			if gap > pairWindow {
+				continue
+			}
+			if best < 0 || gap < sec[0]-idLocs[best][1] {
+				best = i
+			}
+		}
+		if best >= 0 {
+			return s[idLocs[best][0]:idLocs[best][1]], s[sec[0]:sec[1]]
+		}
+	}
+	return "", ""
+}
+
+// ClientFlavor 客户端家族。**决定 redirect 形态、scope 集合与是否用 PKCE**，
+// 三者必须成对使用（混搭必然 redirect_uri_mismatch 或 restricted_client）。
+type ClientFlavor int
+
+const (
+	// FlavorAntigravity 内置的 Antigravity 客户端（默认）：完整 scope + PKCE + 127.0.0.1/callback。
+	FlavorAntigravity ClientFlavor = iota
+	// FlavorCLI 旧的 Gemini CLI 客户端（env 指定或本机提取）：精简 scope、无 PKCE、localhost/oauth-callback。
+	// 保留它只为向后兼容（用户显式设了 env 时尊重其选择），不是推荐路径 ——
+	// 该客户端已被上游标记为 UNSUPPORTED_CLIENT。
+	FlavorCLI
+)
+
 // localOAuthClient 解析结果。
 type localOAuthClient struct {
 	ID     string
 	Secret string
+	// Flavor 这份凭据属于哪个客户端家族（决定 redirect/scope/PKCE 三件套）。
+	Flavor ClientFlavor
 	// SearchRoots 记录本次**实际考察过的**位置（含不存在的），供报错文案如实告知用户
 	// 「到底查了哪里」。修复前只报「请设置环境变量」，用户照做仍然失败且无从排查。
 	SearchRoots []string
@@ -48,9 +119,20 @@ var (
 // env 只给了一半时，用本机 CLI 补另一半：自建客户端理应两枚都给，但宽松处理比直接报错友好。
 func oauthClient() localOAuthClient {
 	oauthClientOnce.Do(func() {
+		envID := strings.TrimSpace(os.Getenv(EnvClientID))
+		envSecret := strings.TrimSpace(os.Getenv(EnvClientSecret))
+		if envID != "" && envSecret != "" {
+			// 用户显式指定了整套凭据：尊重它，按 CLI 家族使用（精简 scope、无 PKCE）。
+			oauthClientVal = localOAuthClient{ID: envID, Secret: envSecret, Flavor: FlavorCLI}
+			return
+		}
+		// 默认走内置的 Antigravity 客户端（2026-10-30，R135）：它是当前在役客户端，
+		// 且登记了 Cloud Code 需要的全部 scope。此前默认回落到「从本机 CLI 提取」，
+		// 而那个客户端已被上游弃用 —— 用户装了 CLI 反而更容易撞 403。
 		oauthClientVal = localOAuthClient{
-			ID:     strings.TrimSpace(os.Getenv(EnvClientID)),
-			Secret: strings.TrimSpace(os.Getenv(EnvClientSecret)),
+			ID:     AntigravityClientID(),
+			Secret: AntigravityClientSecret(),
+			Flavor: FlavorAntigravity,
 		}
 		if oauthClientVal.ID == "" || oauthClientVal.Secret == "" {
 			roots := cliRoots()
@@ -62,9 +144,28 @@ func oauthClient() localOAuthClient {
 				oauthClientVal.Secret = secret
 			}
 			oauthClientVal.SearchRoots = roots
+			// 从本机 CLI 提取到的必然是 CLI 家族的凭据。
+			if oauthClientVal.ID != "" && oauthClientVal.Secret != "" {
+				oauthClientVal.Flavor = FlavorCLI
+			}
 		}
 	})
 	return oauthClientVal
+}
+
+// SetBuiltinClientForTest 临时替换内置的 Antigravity 凭据，返回恢复函数。
+//
+// **仅供测试**：R135 起内置凭据恒非空，「拿不到凭据」那条守门用例（以及它的可操作文案）
+// 就再也走不到了 —— 不把它留成可构造的场景，那段文案会慢慢烂掉而无人发现。
+// 生产路径不得调用。
+func SetBuiltinClientForTest(id, secret string) func() {
+	oldID, oldSecret := antigravityClientID, antigravityClientSecret
+	antigravityClientID, antigravityClientSecret = id, secret
+	ResetOAuthClientCacheForTest()
+	return func() {
+		antigravityClientID, antigravityClientSecret = oldID, oldSecret
+		ResetOAuthClientCacheForTest()
+	}
 }
 
 // ResetOAuthClientCacheForTest 清掉进程级解析缓存，让下一次 ClientID()/ClientSecret() 重新解析。
@@ -187,11 +288,109 @@ func dedupeRoots(roots []string) []string {
 const (
 	// scanMaxFiles 单个 root 最多读多少个文件。
 	scanMaxFiles = 4000
-	// scanMaxBytes 单个文件最大字节数（超过即跳过，不读进内存）。
+	// scanMaxBytes 单个文件最大字节数（**超过即跳过**，不整片读进内存）。
+	//
+	// 2026-10-30 现场修复（issue：装对了也对不上）：官方 CLI 的分发形态已从
+	// 「dist/ 下若干小 .ts」变成「bundle/ 下**单个 16.8MB** 打包 js」
+	// （@google/gemini-cli 0.66.0 实测：`bundle/chunk-HJ5KJXNZ.js` 16784602 字节，
+	// 两枚凭据就在这一个文件里）。旧上限 8MiB 把唯一含有凭据的文件整片跳过 ⇒
+	// `npm i -g @google/gemini-cli` 之后 `ClientID()` 仍返回空串，用户照着错误文案
+	// 装完还是失败。现改为**流式分段扫描**（见 scanFileForOAuth）：
+	// 大文件不再整片跳过，而是按 CRC 分块逐块匹配，内存占用与文件大小无关。
+	// 该常量因此退化为「是否走流式路径」的判据（scanStreamChunk 另立常量）。
 	scanMaxBytes = 8 << 20
+	// scanStreamChunk 流式扫描的分块大小。凭据两枚值的最大长度约 72 / 60 字节，
+	// 8 个 1KiB 块的重叠窗口（scanOverlap）远大于此，跨块匹配不会漏。取 1MiB 是为了
+	// 让 16.8MB 文件只做 17 次块内 FindString，而不是逐行 regex。
+	scanStreamChunk = 1 << 20
+	// scanOverlap 相邻块的重叠窗口：保证跨块断开的凭据仍能被匹配到。
+	scanOverlap = 4096
 	// scanByteBudget 单个 root 的总读取字节预算（防止"4000 个 8MB 文件"把内存吃光）。
-	scanByteBudget = 256 << 20
+	// 流式扫描同样计入（按实际读过的字节累加）。
+	scanByteBudget = 512 << 20
 )
+
+// scanFileForOAuth 在**单个文件**里找两枚凭据：小文件整片读，大文件流式分块读。
+//
+// 返回 (clientID, clientSecret, 实际读取字节数, 错误)。wantID/wantSecret 为 false 时
+// 对应那枚值已从别处拿到，不再浪费时间匹配。
+//
+// 为什么要分两条路径（2026-10-30 现场，见 scanMaxBytes 注释）：
+// 官方 CLI 0.66.0 的凭据在 `bundle/chunk-HJ5KJXNZ.js`（16.8MB 单个文件）。旧实现
+// 「整文件超 8MiB 就跳过」等于把**唯一**的凭据来源排除，用户装完 CLI 仍然失败，
+// 且报错文案还在让他「去装 CLI」——死循环。改为分块流式扫描后，16.8MB 文件只占
+// 一个块的常驻内存，跨块匹配由 scanOverlap 的窗口保证。
+//
+// ⚠️ 分块**不能**简单按字节切：块边界会把 60~72 字节的凭据切成两半，两半都不匹配。
+// 故每次用「上一块尾部 scanOverlap + 本块」作为匹配窗口。
+func scanFileForOAuth(p string, size int64, wantID, wantSecret bool) (id, secret string, read int64, err error) {
+	readBytes := func(b []byte) (string, string) {
+		s := string(b)
+		var gotID, gotSec string
+		// 优先取**配对**（见 reOAuthPair 注释）：两枚都缺时，只有配对命中的才算数，
+		// 避免把另一处的孤立 client_id 与这里的 secret 拼成从未配对过的组合。
+		if wantID && id == "" && wantSecret && secret == "" {
+			return findOAuthPair(s)
+		}
+		// 只有一枚还缺时（另一枚已从别的文件拿到），退化为单值匹配。
+		if wantID && id == "" {
+			gotID = reOAuthClientID.FindString(s)
+		}
+		if wantSecret && secret == "" {
+			gotSec = reOAuthClientSecret.FindString(s)
+		}
+		return gotID, gotSec
+	}
+
+	if size <= scanStreamChunk {
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return "", "", 0, rerr
+		}
+		gotID, gotSec := readBytes(b)
+		return gotID, gotSec, int64(len(b)), nil
+	}
+
+	f, oerr := os.Open(p)
+	if oerr != nil {
+		return "", "", 0, oerr
+	}
+	defer f.Close()
+
+	buf := make([]byte, scanStreamChunk+scanOverlap)
+	var tail []byte // 上一块尾部重叠窗口
+	for {
+		n, rerr := f.Read(buf[len(tail):])
+		if n <= 0 && rerr == nil {
+			break // 文件比 stat 报的更小（被截断）：读到 EOF 即止
+		}
+		if rerr != nil && rerr != io.EOF {
+			return id, secret, read, rerr
+		}
+		chunk := buf[:len(tail)+n]
+		gotID, gotSec := readBytes(chunk)
+		if gotID != "" {
+			id = gotID
+		}
+		if gotSec != "" {
+			secret = gotSec
+		}
+		read += int64(n)
+		if (wantID == false || id != "") && (wantSecret == false || secret != "") {
+			return id, secret, read, nil // 两枚都拿到，提前停
+		}
+		// 保留尾部重叠窗口供下一次匹配跨块凭据。
+		keep := scanOverlap
+		if keep > len(chunk) {
+			keep = len(chunk)
+		}
+		tail = append(tail[:0], chunk[len(chunk)-keep:]...)
+		if rerr == io.EOF {
+			break
+		}
+	}
+	return id, secret, read, nil
+}
 
 // extractOAuthClientFromLocalCLI 在本机 CLI 包里找这两枚值；找不到（或目录不存在）返回空串。
 func extractOAuthClientFromLocalCLI() (id, secret string) {
@@ -241,21 +440,26 @@ func extractOAuthClientFromRoots(roots []string) (id, secret string) {
 				return nil
 			}
 			fi, err := d.Info()
-			if err != nil || fi.Size() > scanMaxBytes || fi.Size() > int64(budget) {
-				return nil
-			}
-			b, err := os.ReadFile(p)
 			if err != nil {
 				return nil
 			}
+			size := fi.Size()
+			if size <= 0 || size > int64(budget) {
+				return nil
+			}
+			// 两枚值可能分别在两个文件里（官方 CLI 把 client_id 留在 SDK 侧、
+			// secret 留在账号管理器侧）；已经都拿到了就别再读了。
+			foundID, foundSec, read, err := scanFileForOAuth(p, size, id == "", secret == "")
 			files++
-			budget -= len(b)
-			s := string(b)
+			budget -= int(read)
+			if err != nil {
+				return nil
+			}
 			if id == "" {
-				id = reOAuthClientID.FindString(s)
+				id = foundID
 			}
 			if secret == "" {
-				secret = reOAuthClientSecret.FindString(s)
+				secret = foundSec
 			}
 			if id != "" && secret != "" {
 				return fs.SkipAll

@@ -147,8 +147,13 @@ func TestExtractReadsTSFiles(t *testing.T) {
 	}
 }
 
-// TestOAuthClientFallsBackToLocalCLI 端到端：env 全空时，oauthClient() 必须回落到本机 CLI 提取。
-func TestOAuthClientFallsBackToLocalCLI(t *testing.T) {
+// TestOAuthClientDefaultsToAntigravity env 全空时必须用**内置的 Antigravity 客户端**。
+//
+// 2026-10-30（R135）语义变更：旧实现在 env 全空时回落到「从本机 CLI 提取」，
+// 但那个客户端已被上游标记 `UNSUPPORTED_CLIENT`，且缺 `cclog`/`experimentsandconfigs`
+// 两个 Cloud Code 必需的 scope ⇒ 登录能成、配额与推理一律 403。
+// 现在默认用 Antigravity 的内置客户端；CLI 提取只在显式要求 CLI 家族时才有意义。
+func TestOAuthClientDefaultsToAntigravity(t *testing.T) {
 	root := t.TempDir()
 	writeFakeCLIPackage(t, filepath.Join(root, "node_modules", "@google", "antigravity"))
 	t.Setenv("GEMINI_CLI_HOME", filepath.Join(root, "node_modules", "@google", "antigravity"))
@@ -157,22 +162,47 @@ func TestOAuthClientFallsBackToLocalCLI(t *testing.T) {
 	resetOAuthClientCache(t)
 
 	got := oauthClient()
-	if got.ID != fakeCLIClientID || got.Secret != fakeCLIClientSecret {
-		t.Fatalf("应从本机 CLI 回落到假凭据，得 %q / %q", got.ID, got.Secret)
+	if got.ID != AntigravityClientID() || got.Secret != AntigravityClientSecret() {
+		t.Fatalf("env 全空时必须用内置 Antigravity 客户端，得 %q / %q", got.ID, got.Secret)
 	}
-	// 报错文案要用它如实告知「查过哪里」：非空且含 GEMINI_CLI_HOME 指的那个目录。
-	if len(got.SearchRoots) == 0 {
-		t.Fatal("SearchRoots 必须记录实际考察过的位置")
+	if got.Flavor != FlavorAntigravity {
+		t.Fatalf("家族必须是 Antigravity，得 %v", got.Flavor)
 	}
-	pkgDir := filepath.Join(root, "node_modules", "@google", "antigravity")
-	var hit bool
-	for _, r := range got.SearchRoots {
-		if strings.EqualFold(filepath.Clean(r), filepath.Clean(pkgDir)) {
-			hit = true
-		}
+	// 装没装 CLI 都不影响：不得因为本机有 CLI 就悄悄换回旧客户端。
+	if got.ID == fakeCLIClientID {
+		t.Fatal("不得因为本机装了 CLI 就回落到 CLI 家族的凭据（那正是 403 的来源）")
 	}
-	if !hit {
-		t.Errorf("SearchRoots 应包含假 CLI 包目录 %s，实际：%v", pkgDir, got.SearchRoots)
+}
+
+// TestOAuthClientEnvSelectsCLIFlavor 显式设了整套 env 时尊重用户：按 CLI 家族使用。
+func TestOAuthClientEnvSelectsCLIFlavor(t *testing.T) {
+	t.Setenv(EnvClientID, "123456789012-abcdefghijklmnopqrstuv.apps.googleusercontent.com")
+	t.Setenv(EnvClientSecret, "GOCSPX-abcdefghijklmnopqrstuvwx")
+	resetOAuthClientCache(t)
+
+	got := oauthClient()
+	if got.Flavor != FlavorCLI {
+		t.Fatalf("显式 env 应归 CLI 家族（精简 scope、无 PKCE），得 %v", got.Flavor)
+	}
+	if got.ID != os.Getenv(EnvClientID) {
+		t.Fatalf("必须用 env 给的 id，得 %q", got.ID)
+	}
+}
+
+// TestLocalCLIExtractionStillWorks 提取能力本身仍在（作为后备路径与诊断用）。
+//
+// R135 之后它不再是默认来源（默认走内置 Antigravity 客户端），但函数必须继续可用：
+// 用户显式改用 CLI 客户端、或排查「本机到底装了哪个版本的 CLI」时都要靠它。
+func TestLocalCLIExtractionStillWorks(t *testing.T) {
+	root := t.TempDir()
+	writeFakeCLIPackage(t, filepath.Join(root, "node_modules", "@google", "antigravity"))
+	t.Setenv("GEMINI_CLI_HOME", filepath.Join(root, "node_modules", "@google", "antigravity"))
+	t.Setenv(EnvClientID, "")
+	t.Setenv(EnvClientSecret, "")
+
+	id, secret := extractOAuthClientFromLocalCLI()
+	if id != fakeCLIClientID || secret != fakeCLIClientSecret {
+		t.Fatalf("应从本机 CLI 提取到假凭据，得 %q / %q", id, secret)
 	}
 }
 
@@ -224,23 +254,37 @@ func TestExtractStopsAtFileCap(t *testing.T) {
 	}
 }
 
-// TestScanSkipsOversizedFiles 上界：单个超限文件必须跳过（不读进内存）。
-func TestScanSkipsOversizedFiles(t *testing.T) {
+// TestScanReadsOversizedFileByStreaming 大文件**必须**被流式扫到（2026-10-30 现场缺陷）。
+//
+// 这条用例取代了旧的 `TestScanSkipsOversizedFiles`，两者断言相反 —— 旧行为是
+// 「超过 scanMaxBytes 就整片跳过」，而官方 CLI 0.66.0 把两枚凭据放在**单个 16.8MB**
+// 的 `bundle/chunk-*.js` 里（实测），于是「跳过超限文件」= 「永远取不到凭据」：
+// 用户照着报错文案 `npm i -g @google/gemini-cli` 装完、重启、再点，仍然报同一句
+// 「未获取到 Google OAuth 客户端凭据」，形成死循环。
+//
+// ⚠️ 旧用例其实是**假通过**：它把大文件写在 `<root>/node_modules/huge.js`，
+// 而扫描器本来就会 `SkipDir` 掉 root 之下的 `node_modules`（与大小无关），
+// 所以把大小上限改成 1 字节它照样绿。新用例因此**不放进 node_modules**，
+// 而是按官方真实布局放在 root 下的 `bundle/`。
+func TestScanReadsOversizedFileByStreaming(t *testing.T) {
 	root := t.TempDir()
-	big := filepath.Join(root, "node_modules", "huge.js")
-	if err := os.MkdirAll(filepath.Dir(big), 0o755); err != nil {
+	bundle := filepath.Join(root, "bundle")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
 		t.Fatalf("建目录失败：%v", err)
 	}
-	// > scanMaxBytes：值藏在尾部，但整文件超限 ⇒ 必须整片跳过。
+	big := filepath.Join(bundle, "chunk-HUGE.js")
 	f, err := os.Create(big)
 	if err != nil {
 		t.Fatalf("建大文件失败：%v", err)
 	}
+	// 超过 scanMaxBytes 的填充（模拟 16.8MB 单包），凭据放在**文件尾部**：
+	// 只有真正读到尾部的实现才能命中（分块流式读的窗口逻辑也一并被测到）。
 	if _, err := f.Write(make([]byte, scanMaxBytes+1)); err != nil {
 		_ = f.Close()
 		t.Fatalf("写大文件失败：%v", err)
 	}
-	if _, err := f.WriteString(fakeCLIClientID + " " + fakeCLIClientSecret); err != nil {
+	if _, err := f.WriteString("var OAUTH_CLIENT_ID = \"" + fakeCLIClientID + "\"; " +
+		"var OAUTH_CLIENT_SECRET = \"" + fakeCLIClientSecret + "\";"); err != nil {
 		_ = f.Close()
 		t.Fatalf("写大文件尾部失败：%v", err)
 	}
@@ -248,8 +292,35 @@ func TestScanSkipsOversizedFiles(t *testing.T) {
 	t.Setenv("GEMINI_CLI_HOME", root)
 
 	id, secret := extractOAuthClientFromLocalCLI()
-	if id != "" || secret != "" {
-		t.Errorf("超限文件必须跳过，却提取到 %q / %q", id, secret)
+	if id != fakeCLIClientID || secret != fakeCLIClientSecret {
+		t.Fatalf("超限文件必须被流式扫到：id=%q secret=%q", id, secret)
+	}
+}
+
+// TestPairingPicksNearestClientID 配对判据：secret 必须与**紧邻其前**的 client_id 成对。
+//
+// 现场依据（官方 CLI 0.66.0 实测，逐字节量过）：同一个文件里有两个 client_id ——
+// google-auth-library 的 `CLOUD_SDK_CLIENT_ID`（偏移 5649522，无配对 secret）
+// 与真正的 `OAUTH_CLIENT_ID`（偏移 12279769，其后 102 字节即 secret）。
+// 旧的「各取首个命中」会把前者与后者拼成从未配对过的组合 ⇒ 授权页回 invalid_client。
+func TestPairingPicksNearestClientID(t *testing.T) {
+	root := t.TempDir()
+	decoy := "5" + strings.Repeat("5", 9) + "-" + strings.Repeat("f", 24) + ".apps.googleusercontent.com"
+	body := "exports.CLOUD_SDK_CLIENT_ID = \"" + decoy + "\";\n" +
+		strings.Repeat("var unrelated = 1;\n", 200) +
+		"var OAUTH_CLIENT_ID = \"" + fakeCLIClientID + "\";\n" +
+		"var OAUTH_CLIENT_SECRET = \"" + fakeCLIClientSecret + "\";\n"
+	if err := os.WriteFile(filepath.Join(root, "bundle.js"), []byte(body), 0o600); err != nil {
+		t.Fatalf("写文件失败：%v", err)
+	}
+	t.Setenv("GEMINI_CLI_HOME", root)
+
+	id, secret := extractOAuthClientFromLocalCLI()
+	if id == decoy {
+		t.Fatalf("取了无配对 secret 的 CLOUD_SDK_CLIENT_ID（错配）：id=%q", id)
+	}
+	if id != fakeCLIClientID || secret != fakeCLIClientSecret {
+		t.Fatalf("配对失败：id=%q secret=%q", id, secret)
 	}
 }
 

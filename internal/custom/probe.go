@@ -297,7 +297,13 @@ func getAt(u string, mode AuthMode, key string) ([]byte, int, error) {
 		req.Header.Set("Authorization", h)
 	}
 	hc := &http.Client{Timeout: probeTimeout}
-	resp, err := hc.Do(req)
+	// 探测也要能走备用通道：用户在面板里点「识别端点」时如果被墙，
+	// 没有回落的话只会看到「连接失败」，而他明明配好了代理。
+	var probeTr *http.Transport
+	if tr, ok := hc.Transport.(*http.Transport); ok {
+		probeTr = tr
+	}
+	resp, err := doWithFallbackTr(req, hc, probeTr)
 	if err != nil {
 		return nil, 0, fmt.Errorf("连接失败：%v", err)
 	}

@@ -92,10 +92,17 @@ type entry struct {
 	// creditsStale 余额口径不可信（旧版 state 或从未成功刷新过）。
 	// 仅影响面板展示，不参与 Pick() 路由。
 	creditsStale bool
-	disabled     bool
-	reason       string
-	until        time.Time
-	errCount     int
+	// windows 百分比配额窗口快照（Gemini 的 5 小时/周窗口等）。
+	//
+	// 为什么需要它（2026-10-30 用户实测）：`UserResource` 对这类渠道**恒返回 0**
+	// （额度不是"积分"而是"窗口剩余百分比"），于是面板把「额度充足」显示成「0 积分」，
+	// 看起来像额度耗尽。窗口必须随 state 一起下发，卡片才不用为每个账号异步拉详情。
+	// 仅展示，不参与 Pick() 路由。
+	windows  []QuotaWindow
+	disabled bool
+	reason   string
+	until    time.Time
+	errCount int
 	// modelCool 模型级冷却：model → 解冻时刻（429/6004 上游按模型限额，
 	// 只冷却撞墙的模型，账号对其他模型仍可用）。条目过期后延迟清理。
 	modelCool map[string]time.Time
@@ -150,17 +157,20 @@ type accountState struct {
 	// EarliestExpireUnix 最早有效到期时刻（unix 秒，0 = 无到期信息）。R112 的路由键。
 	// 不 bump stateVersion：老文件缺该字段只会读成「无到期信息」⇒ 退回按余额排序，
 	// 与升级前行为等价，首刷（10 分钟内）自动补上；bump 反而会让全部账号白闪一次「待刷新」。
-	EarliestExpireUnix int64                `json:"earliest_expire,omitempty"`
-	Disabled           bool                 `json:"disabled"`
-	Reason             string               `json:"reason,omitempty"`
-	Until              time.Time            `json:"until,omitempty"`
-	ModelCool          map[string]time.Time `json:"model_cooling,omitempty"`
-	LastCheckinOK      bool                 `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt      time.Time            `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg     string               `json:"last_checkin_msg,omitempty"`
-	SessionDead        bool                 `json:"session_dead,omitempty"`
-	SessionDeadReason  string               `json:"session_dead_reason,omitempty"`
-	SessionDeadAt      time.Time            `json:"session_dead_at,omitempty"`
+	EarliestExpireUnix int64 `json:"earliest_expire,omitempty"`
+	// Windows 百分比配额窗口（omitempty：老文件缺该字段 = 无窗口信息，按"待刷新"显示）。
+	// 不 bump stateVersion —— 与 earliest_expire 同一口径，缺字段时行为退化为展示空。
+	Windows           []QuotaWindow        `json:"quota_windows,omitempty"`
+	Disabled          bool                 `json:"disabled"`
+	Reason            string               `json:"reason,omitempty"`
+	Until             time.Time            `json:"until,omitempty"`
+	ModelCool         map[string]time.Time `json:"model_cooling,omitempty"`
+	LastCheckinOK     bool                 `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt     time.Time            `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg    string               `json:"last_checkin_msg,omitempty"`
+	SessionDead       bool                 `json:"session_dead,omitempty"`
+	SessionDeadReason string               `json:"session_dead_reason,omitempty"`
+	SessionDeadAt     time.Time            `json:"session_dead_at,omitempty"`
 }
 
 // Pool 账号池。
@@ -689,6 +699,7 @@ func (p *Pool) load() {
 			expiring:          s.Expiring,
 			unusable:          s.Unusable,
 			earliestExpire:    unixOrZero(s.EarliestExpireUnix),
+			windows:           s.Windows,
 			creditsStale:      stale,
 			disabled:          s.Disabled,
 			reason:            s.Reason,
@@ -725,6 +736,7 @@ func (p *Pool) saveLocked() {
 			Expiring:           e.expiring,
 			Unusable:           e.unusable,
 			EarliestExpireUnix: zeroOrUnix(e.earliestExpire),
+			Windows:            e.windows,
 			Disabled:           e.disabled,
 			Reason:             e.reason,
 			Until:              e.until,
@@ -749,4 +761,39 @@ func (p *Pool) saveLocked() {
 		return
 	}
 	_ = os.Rename(tmp, p.stateFp)
+}
+
+// QuotaWindow 百分比配额的一个窗口（如 Gemini 的「5 小时窗口」「周窗口」）。
+//
+// Percent 是**剩余百分比**（0~100），不是积分也不是 token —— 这类渠道没有"可消耗积分"
+// 的概念，额度按窗口滚动重置。面板必须换一种表达，否则只能显示一个恒为 0 的积分数。
+type QuotaWindow struct {
+	Name    string    `json:"name"`
+	Percent int       `json:"percent"`
+	ResetAt time.Time `json:"reset_at,omitempty"`
+}
+
+// SetQuotaWindows 写入百分比配额窗口快照（仅展示，不参与路由）。
+func (p *Pool) SetQuotaWindows(uid string, windows []QuotaWindow) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.windows = windows
+	}
+	// 与 SetCreditDetail 同口径落盘：窗口与余额来自**同一次**上游响应，
+	// 不落盘的话重启后窗口丢失、面板退回「待刷新」，而余额却还在 —— 自相矛盾。
+	p.saveLocked()
+}
+
+// QuotaWindows 读取某账号的窗口快照（副本，调用方随便改）。
+func (p *Pool) QuotaWindows(uid string) []QuotaWindow {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok || len(e.windows) == 0 {
+		return nil
+	}
+	out := make([]QuotaWindow, len(e.windows))
+	copy(out, e.windows)
+	return out
 }

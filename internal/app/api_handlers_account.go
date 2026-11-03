@@ -1,9 +1,15 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
+	"strings"
+	"time"
 
+	"wild-work/internal/doubaocdp"
 	"wild-work/internal/provider"
 )
 
@@ -114,4 +120,38 @@ func (a *App) apiAccountNickname(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// apiDoubaoConnect 确保豆包客户端在调试端口上就绪（必要时以调试模式重启）。
+//
+// 为什么要做成显式动作（2026-10-30 用户实测）：
+// 本渠道的签名靠客户端前端 JS hook 注入，必须客户端带 --remote-debugging-port 启动；
+// 而用户的豆包是**开机自启**、那一路不带该参数，双击图标也带不上 —— 于是每次连接都失败，
+// 且错误只说了「需要以 --remote-debugging-port 启动」，用户无法靠自己解决。
+//
+// 这个端点把那次重启变成一键动作。请求可带 addr（默认 127.0.0.1:30813）。
+func (a *App) apiDoubaoConnect(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Addr string `json:"addr"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	addr := strings.TrimSpace(req.Addr)
+	if addr == "" {
+		addr = fmt.Sprintf("127.0.0.1:%d", doubaocdp.DefaultDebugPort)
+	}
+	// 30s：重启 + 等端口就绪（EnsureDebugPort 内部最多等 25s）。
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	restarted, err := doubaocdp.EnsureDebugPort(ctx, addr)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	msg := "豆包调试端口已就绪"
+	if restarted {
+		msg = "已把豆包以调试模式重启，端口已就绪"
+	}
+	log.Printf("doubao connect: %s (addr=%s)", msg, addr)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restarted": restarted, "msg": msg})
 }

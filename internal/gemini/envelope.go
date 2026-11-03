@@ -98,6 +98,17 @@ type part struct {
 	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
 	InlineData       *inlineData       `json:"inlineData,omitempty"`
 	Text             string            `json:"text,omitempty"`
+	// ThoughtSignature Gemini 4/3 的思考签名（2026-11-03 用户实测必填）。
+	//
+	// 原注释写着「thoughtSignature 不回填（未确认项）」—— 那个未确认项现在有了答案：
+	// **Gemini 4/3 在工具调用上强制校验**，缺了直接 400：
+	//   `Function call is missing a thought_signature in functionCall parts…`
+	// 规则（官方 thought-signatures 文档）：
+	//   · 并行调用只有**第一个** functionCall 带签名，后续同一步骤的不带；
+	//   · **当前轮**每一步的第一个 functionCall 必须回传原签名；
+	//   · 只校验当前轮（从最新往前找到最近一条含文本的 user 消息起算）。
+	// 声明序放在末尾：签名与 functionCall 同级，官方示例也是 functionCall 在前。
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 // functionCall 工具调用。
@@ -204,6 +215,15 @@ func newRequestID() string {
 // 调用方据此产出**本地 400**（而不是把错误当传输层错误去惩罚账号——那是为客户端的问题
 // 罚健康账号，见 minimax.ChatStream 的同款取舍）。
 func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
+	return buildInternalBodyMode(raw, project, false)
+}
+
+// buildInternalBodyMode 同 buildInternalBody，但可把**所有**签名强制换成哨兵值。
+//
+// forceSentinel 用于降级重试：客户端可能回传一个来自别处（换过模型 / 旧会话 / 中间层
+// 缓存）的真实签名，上游会以 `400 Request contains an invalid argument`（注意：不是
+// "missing"）拒绝。那种情况下统一换成哨兵就能过 —— 见 ChatStream 的重试分支。
+func buildInternalBodyMode(raw []byte, project string, forceSentinel bool) ([]byte, string, error) {
 	in, err := decodeRequest(raw)
 	if err != nil {
 		return nil, errCodeBadParams, err
@@ -219,7 +239,7 @@ func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
 	}
 	tier := tierOf(jsonString(in["reasoning_effort"]))
 
-	contents, sysTexts, err := translateMessages(in["messages"])
+	contents, sysTexts, err := translateMessages(in["messages"], forceSentinel)
 	if err != nil {
 		return nil, errCodeBadParams, err
 	}

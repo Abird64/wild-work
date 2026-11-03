@@ -92,8 +92,9 @@ function fmtClock(ts) {
 
 // renderHomeScenes 三场景摘要（只读）。编辑在「模型管理」页，这里只回答「现在落到谁」。
 // 备胎链只列前 3 个（更多没有决策价值，看全链去模型管理页）。
+// 若首页未挂载 #homeScenes（首页移除该模块），则静默跳过。
 function renderHomeScenes() {
-  const box = $("homeScenes");
+  const box = document.getElementById("homeScenes");
   if (!box || !state) return;
   // 用 data-goto + 容器上的 onclick 委托，而不是给按钮起 id：动态生成的节点若用 id，
   // 「$() 悬空引用」扫描会把它当成指向不存在 DOM。onclick 赋值天然幂等（重复赋值只替换），
@@ -160,7 +161,12 @@ function showMainTab(name) {
     if (!lastStats) { loadStats().catch(() => {}); }
     ensureSceneEditor();
   }
-  if (t === "other") syncOtherNav();
+  if (t === "other") {
+    // 表单字段必须在这里回填：用户是点这个页签直达的，不会走顶栏 ⚙ 的 openSettings()
+    // （2026-10-30 缺陷：漏了这一句时 `#inPort` 恒为空 ⇒ 保存时端口变 0 ⇒「端口无效：0」）。
+    renderSettingsForm();
+    syncOtherNav();
+  }
 }
 
 // ensureSceneEditor 门车型渲染：只有「还没渲染过」才灌数据。

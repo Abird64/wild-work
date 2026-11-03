@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -46,6 +47,9 @@ const emitBinding = "__wwDoubaoEmit"
 const emitDone = "\x00WW_DONE\x00"
 const emitErr = "\x00WW_ERR\x00"
 
+// relaunchCooldown 自愈重启的最小间隔：防止上游持续失败时反复杀掉并重启用户的豆包。
+const relaunchCooldown = 60 * time.Second
+
 // Client 实现 provider.Upstream。
 //
 // 与其余渠道的本质差别：所有上游调用都在豆包客户端的页面上下文里执行，
@@ -53,6 +57,12 @@ const emitErr = "\x00WW_ERR\x00"
 // 也不做签名计算。
 type Client struct {
 	addr string // 调试端口地址，如 127.0.0.1:30813
+
+	// 自愈相关：端口未就绪时以调试模式重启豆包（见 tryRelaunch）。
+	relaunchMu   sync.Mutex
+	lastRelaunch time.Time
+	// kindForLog 仅用于日志前缀，让 app.log 能看出是哪个渠道在重启客户端。
+	kindForLog string
 
 	// 串行化「取页面 + 建连」这一步。真正的请求各自持有独立 doubaocdp.CDP 连接，
 	// 所以不是全局串行——避免一条慢流卡死整个渠道。
@@ -64,7 +74,7 @@ func New(addr string) *Client {
 	if strings.TrimSpace(addr) == "" {
 		addr = fmt.Sprintf("127.0.0.1:%d", doubaocdp.DefaultDebugPort)
 	}
-	return &Client{addr: addr}
+	return &Client{addr: addr, kindForLog: "doubao"}
 }
 
 // Addr 返回调试端口地址。
@@ -80,13 +90,48 @@ func (c *Client) dialPage(ctx context.Context) (*doubaocdp.CDP, error) {
 
 	targets, err := doubaocdp.ListTargets(ctx, c.addr)
 	if err != nil {
-		return nil, err
+		// 端口没起：豆包常见是「开机自启、但启动命令不带调试端口」（2026-10-30 用户实测）。
+		// 这里按需以调试模式重启一次再试 —— 否则用户只能看到一个他无法自己解决的错误
+		// （双击图标带不上 --remote-debugging-port）。
+		// 有冷却限制：同一进程内失败后 60 秒内不再反复重启别人的应用。
+		if ok, rerr := c.tryRelaunch(ctx); ok {
+			if rerr != nil {
+				return nil, rerr
+			}
+			targets, err = doubaocdp.ListTargets(ctx, c.addr)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 	t := doubaocdp.PickChatTarget(targets)
 	if t == nil {
 		return nil, fmt.Errorf("%w: 没找到豆包对话页（客户端可能停在登录页）", doubaocdp.ErrClientUnavailable)
 	}
 	return doubaocdp.Dial(ctx, t.WebSocketDebuggerURL)
+}
+
+// tryRelaunch 端口未就绪时尝试以调试模式重启豆包（带冷却，避免反复折腾用户的应用）。
+//
+// 返回 (是否已尝试过重启, 重启错误)。false 表示「冷却中，直接按原错误上报」。
+func (c *Client) tryRelaunch(ctx context.Context) (bool, error) {
+	c.relaunchMu.Lock()
+	defer c.relaunchMu.Unlock()
+	if time.Since(c.lastRelaunch) < relaunchCooldown {
+		return false, nil
+	}
+	c.lastRelaunch = time.Now()
+	restarted, err := doubaocdp.EnsureDebugPort(ctx, c.addr)
+	if err != nil {
+		log.Printf("%s 以调试模式重启豆包失败：%v", c.kindForLog, err)
+		return true, err
+	}
+	if restarted {
+		log.Printf("%s 已把豆包以调试模式重启（此前未监听 %s）", c.kindForLog, c.addr)
+	}
+	return true, nil
 }
 
 // ChatStream 发起一次对话，返回**豆包原始 SSE** 的读端。

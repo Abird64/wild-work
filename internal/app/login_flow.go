@@ -194,9 +194,22 @@ func init() {
 		Poll:  wrapPoll(loginzcode.Poll, loginzcode.ErrPending, func(a *App, r loginzcode.Result) error { a.completeZCodeLogin(r); return nil }),
 	}
 	loginFlows[provider.Gemini] = &loginFlow{
-		Start:    logingemini.Start,
-		Poll:     wrapPoll(logingemini.Poll, logingemini.ErrPending, func(a *App, r logingemini.Result) error { a.completeGeminiLogin(r); return nil }),
-		Shutdown: logingemini.Shutdown,
+		Start: logingemini.Start,
+		Poll:  wrapPoll(logingemini.Poll, logingemini.ErrPending, func(a *App, r logingemini.Result) error { a.completeGeminiLogin(r); return nil }),
+		// ⚠️ 必须显式登记 clientFactory（2026-10-30 现场缺陷，R133）：
+		// 不写这一行时 `newLoginClient` 会退回 `login.NewClient()` —— 那是**裸直连**
+		// 的 `&http.Client{}`，与 gemini 自己的代理取用毫无关系。
+		// 症状极隐蔽：授权页能正常打开（那是浏览器的事），用户在 Google 点完同意、
+		// 浏览器也跳回了本机回调，但**换码请求打不出国门**，30 秒后报
+		// 「本机网络到 Google 不可达」，日志里是 `dial tcp 108.177.98.95:443 …`
+		// （直连 Google IP、完全没经过代理）—— 用户会以为是代理没配好，其实配对了，
+		// 只是这条链路从没被接上。判据：`loginFlows` 里凡是真正发起 HTTP 授权的渠道，
+		// 要么有自己的 clientFactory，要么有明确理由用默认 client。
+		clientFactory: logingemini.NewClient,
+		// 超时上限跟本包的 flowTTL（6m）走，否则 app 的通用 5m 会先到，
+		// 把「带传输失败原因」的超时文案永远挡在门外（见 gemini.FlowTTL 注释）。
+		pollTimeout: logingemini.FlowTTL,
+		Shutdown:    logingemini.Shutdown,
 	}
 	loginFlows[provider.CodeArts] = &loginFlow{
 		Start:    logincodearts.Start,

@@ -5,13 +5,16 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
@@ -60,7 +63,11 @@ type Client struct {
 	cfg        ChannelConfig
 	HTTP       *http.Client // 带总超时，供非流式
 	StreamHTTP *http.Client // 无总超时，供长 SSE 流式（R35）
-	idle       time.Duration
+	// baseTr 直连用的 transport。**只在直连连接层失败时**拿去问备用通道要一个
+	// 代理版 client（见 doWithFallback），不做默认代理 —— R57「备用通道默认不参与
+	// 任何请求，仅按需取用」在自定义渠道上的落地形态。
+	baseTr *http.Transport
+	idle   time.Duration
 }
 
 // New 构造自定义渠道客户端（取默认超时）。
@@ -95,6 +102,7 @@ func NewWithTimeout(cfg ChannelConfig, requestTimeout time.Duration) *Client {
 		cfg:        cfg,
 		HTTP:       &http.Client{Transport: tr, Timeout: requestTimeout},
 		StreamHTTP: &http.Client{Transport: tr},
+		baseTr:     tr,
 		idle:       defaultIdleTimeout,
 	}
 }
@@ -155,6 +163,77 @@ func (c *Client) Classify(status int, _ string) provider.ErrKind {
 	}
 }
 
+// doWithFallback 发请求；**仅当直连在连接层失败**且已配置备用通道时，换代理重试一次。
+//
+// 为什么需要（2026-10-30 现场）：自定义渠道的 transport 用的是
+// `http.ProxyFromEnvironment` —— 它只读 `HTTPS_PROXY` 环境变量，**完全不看本工具的
+// 「备用上游通道」**（那是 backuplink 的事），也**不读 Windows 的系统代理设置**
+// （Go 在 Windows 上不查注册表）。于是用户明明在面板里配好并验证过代理，
+// 自定义渠道打境外 API 仍然 DNS/连接超时，且看不出原因。
+//
+// 为什么不干脆默认走代理：R57 定的语义是「备用通道默认不参与任何请求，仅渠道按需取用」。
+// 自定义渠道的 base_url 是用户手填的，可能是国内地址 —— 一律走代理会把它绕出国、
+// 变慢甚至失败。所以按「需要时才用」：只有直连**连接层**失败才回落。
+//
+// 判据只认连接层（DNS/超时/拒绝/handshake）：HTTP 4xx/5xx 说明网络是通的，
+// 换出口没有意义，重试只会掩盖真实错误。
+func (c *Client) doWithFallback(req *http.Request, hc *http.Client, stream bool) (*http.Response, error) {
+	return doWithFallbackTr(req, hc, c.baseTr)
+}
+
+// doWithFallbackTr 与 doWithFallback 同义，但接受显式 transport ——
+// 端点探测（probe.go 的 getAt）是包级函数、没有 Client 实例，走这一版。
+func doWithFallbackTr(req *http.Request, hc *http.Client, base *http.Transport) (*http.Response, error) {
+	resp, err := hc.Do(req)
+	if err == nil || !isConnectFailure(err) || !backuplink.Enabled() {
+		return resp, err
+	}
+	if base == nil {
+		return resp, err
+	}
+	bc := backuplink.Client(base)
+	if bc == nil {
+		return resp, err
+	}
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		b, gerr := req.GetBody()
+		if gerr != nil {
+			return resp, err
+		}
+		retry.Body = b
+	}
+	log.Printf("custom: 直连失败（%v），改用备用通道 %s 重试一次", err, backuplink.Raw())
+	return bc.Do(retry)
+}
+
+// isConnectFailure 连接层失败判据（不是 HTTP 错误，而是根本没通）。
+func isConnectFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var netErr net.Error // 超时 / 连接被拒 / 网络不可达
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range []string{"connection refused", "no such host", "i/o timeout",
+		"tls handshake", "network is unreachable", "connectex", "eof"} {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // ChatStream 发送聊天完成请求到上游。
 func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/chat/completions"
@@ -181,7 +260,7 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		hc = c.StreamHTTP
 	}
 
-	resp, err := hc.Do(req)
+	resp, err := c.doWithFallback(req, hc, peek.Stream)
 	if err != nil {
 		cancel()
 		return nil, 0, nil, err

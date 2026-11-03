@@ -99,15 +99,15 @@ function renderAccounts() {
     return `
     <div class="acct-card${disabledClass}${coolingClass}${naHiddenClass}" data-group="${esc(a.group || "workbuddy")}" data-na="${isNoCreditAcct(a) ? 1 : 0}">
       <div class="acct-top">
-        <div>
+        <div class="acct-id-group">
           ${chBadge(a.group)}
           ${nameHtml}
+          <span class="acct-uid">#${esc(shortUid(a.uid))}</span>
         </div>
         <div class="acct-ops">
           ${ops}
         </div>
       </div>
-      <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
         <div class="acct-credits${noCredits ? "" : " clickable"}" data-uid="${a.uid}"${noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</div>
         <div class="acct-checkin">${coolingTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>

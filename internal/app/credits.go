@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 )
 
@@ -57,7 +58,44 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
 	}
 	rt.Pool.SetCreditDetail(au.UID, remain, expiring, unusable, earliest)
+	// 百分比配额窗口（Gemini 等）：与余额同源写入，卡片才能在首屏就显示「5 小时 100%」
+	// 而不是一个恒为 0 的积分数（2026-10-30 用户实测：额度充足却显示 0）。
+	if ws := quotaWindowsFrom(items); len(ws) > 0 {
+		rt.Pool.SetQuotaWindows(au.UID, ws)
+	}
 	return remain, items, expiring, unusable, nil
+}
+
+// quotaWindowsFrom 把 ResourceItem 里的 **百分比窗口** 提取成 pool.QuotaWindow。
+//
+// 判据（与 provider.ResourceItem 的既有语义对齐）：
+//   - 只取 `Total == 100` 的条目 —— 那是「百分比窗口」的约定形态
+//     （gemini 的 parseQuotaItems 就是按 remain/total 都是百分数生成的）；
+//   - 普通积分的 total 是分值（几百上千），不会被误收；
+//   - total 为 0 的条目跳过（无意义，也防除零）。
+//
+// 为什么不用 `Unit` 字段判：它是枚举标签，加新枚举要动 provider 契约；
+// 而 100 这个值本身就是这类窗口的定义，判据更直接、也不必改既有类型。
+func quotaWindowsFrom(items []provider.ResourceItem) []pool.QuotaWindow {
+	var out []pool.QuotaWindow
+	for _, it := range items {
+		if it.Total != 100 || it.Name == "" {
+			continue
+		}
+		pct := int(it.Remain)
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		w := pool.QuotaWindow{Name: it.Name, Percent: pct}
+		if t, err := time.Parse(time.RFC3339, it.ExpireAt); err == nil {
+			w.ResetAt = t
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // creditTotals 取三口径小计（不含 items），并在同一响应上喂入运行统计的最近临期。

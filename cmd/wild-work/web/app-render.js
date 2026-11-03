@@ -156,6 +156,21 @@ function fmtTokens(n) {
   return n.toLocaleString("zh-CN");
 }
 
+// shortWindowName 把上游窗口名压成面板能放下的短标签。
+//
+// 上游原名带「（%）」后缀（如「5 小时窗口（%）」），那是计量单位说明，
+// 放进卡片既长又重复（旁边已经有 % 号）。这里只去掉后缀，不做其它改写 ——
+// 窗口叫什么由上游定，前端不该另起一套名字。
+function shortWindowName(name) {
+  // 除了「（%）」后缀，豆包那侧还会带「 (type=1)」这类协议内部标注 ——
+  // 那是上游窗口编号，对用户没有意义，一律剥掉（窗口叫什么由上游定，前端只做收纳）。
+  return String(name || "")
+    .replace(/（%）/g, "")
+    .replace(/\s*\(type=\d+\)\s*$/i, "")
+    .replace(/#/g, "")
+    .trim();
+}
+
 function creditsText(a) {
   if (a.credits_na) {
     return `<span class="credit-na" title="该渠道无积分概念">不适用</span>`;
@@ -166,6 +181,23 @@ function creditsText(a) {
   // Token 计量渠道（credits_unit="token"，如 ZCode）：同一位置改显示 **Token 计数**。
   // 与积分分开统计——它**不进**积分汇总合计（见 renderSummary），
   // 但保留临期角标（token 桶同样有到期时间，来自内部 ResourceItem.ExpireAt）。
+  // 百分比配额渠道（credits_unit="percent"，如 Gemini）：额度是「窗口剩余百分比」，
+  // 不存在"可用积分"。旧实现落到默认分支显示「0 可用积分」——额度明明满格却像已耗尽
+  // （2026-10-30 用户实测）。这里改成逐窗口展示，窗口名与重置时刻都由后端下发。
+  if (a.credits_unit === "percent") {
+    const ws = a.quota_windows || [];
+    if (!ws.length) {
+      // 还没刷过（或刷新失败）：如实说"待刷新"，不编造 0%。
+      return `<span class="credit-stale" title="百分比配额尚未刷新，下次自动刷新后显示">待刷新</span>`;
+    }
+    return ws.map((w) => {
+      const pct = Number(w.percent) || 0;
+      const cls = pct <= 10 ? "credit-expiring" : "credit-pct";
+      const tip = w.reset_at ? `${w.name}剩余 ${pct}%，${w.reset_at.replace("T", " ").slice(0, 16)} 重置`
+        : `${w.name}剩余 ${pct}%`;
+      return `<span class="${cls}" title="${esc(tip)}">${esc(shortWindowName(w.name))} ${pct}%</span>`;
+    }).join(`<span class="credit-wsep"> · </span>`);
+  }
   if (a.credits_unit === "token") {
     let html = `<span class="credit-num">${fmtTokens(a.credits)}</span>`
       + `<span title="本渠道额度以 token 计量，与积分分开统计">tokens</span>`;
@@ -174,7 +206,7 @@ function creditsText(a) {
     }
     return html;
   }
-  let html = `<span class="credit-num">${a.credits}</span><span>可用积分</span>`;
+  let html = `<span class="credit-num">${a.credits}</span><span class="credit-unit">可用积分</span>`;
   if ((a.expiring_credits || 0) > 0) {
     html += `<span class="credit-expiring"> (临期${a.expiring_credits})</span>`;
   }

@@ -68,10 +68,19 @@ const DefaultBotID = "7338286299411103781"
 // ——R49：只透传上游真实声明。
 const ModelAuto = "auto"
 
+// relaunchCooldown 自愈重启的最小间隔（与 internal/doubao 同口径）。
+const relaunchCooldown = 60 * time.Second
+
 // Client 实现 provider.Upstream。
 type Client struct {
 	addr string
-	mu   sync.Mutex
+
+	// 自愈相关：端口未就绪时以调试模式重启豆包（见 tryRelaunch）。
+	relaunchMu   sync.Mutex
+	lastRelaunch time.Time
+	// kindForLog 仅用于日志前缀，让 app.log 能看出是哪个渠道在重启客户端。
+	kindForLog string
+	mu         sync.Mutex
 }
 
 // New 创建客户端；addr 为空时用默认调试端口。
@@ -79,7 +88,7 @@ func New(addr string) *Client {
 	if strings.TrimSpace(addr) == "" {
 		addr = fmt.Sprintf("127.0.0.1:%d", doubaocdp.DefaultDebugPort)
 	}
-	return &Client{addr: addr}
+	return &Client{addr: addr, kindForLog: "doubaowork"}
 }
 
 // StaticModels 返回静态模型表。
@@ -92,6 +101,25 @@ func StaticModels() []provider.ModelInfo {
 }
 
 // FetchModels 返回静态表（上游无 OpenAI 式 /models）。
+// tryRelaunch 端口未就绪时尝试以调试模式重启豆包（带冷却）。
+func (c *Client) tryRelaunch(ctx context.Context) (bool, error) {
+	c.relaunchMu.Lock()
+	defer c.relaunchMu.Unlock()
+	if time.Since(c.lastRelaunch) < relaunchCooldown {
+		return false, nil
+	}
+	c.lastRelaunch = time.Now()
+	restarted, err := doubaocdp.EnsureDebugPort(ctx, c.addr)
+	if err != nil {
+		log.Printf("%s 以调试模式重启豆包失败：%v", c.kindForLog, err)
+		return true, err
+	}
+	if restarted {
+		log.Printf("%s 已把豆包以调试模式重启（此前未监听 %s）", c.kindForLog, c.addr)
+	}
+	return true, nil
+}
+
 func (c *Client) FetchModels(_ *auth.Auth) ([]provider.ModelInfo, error) { return StaticModels(), nil }
 
 // FetchModelPricing 无按模型计价口径。
@@ -145,7 +173,21 @@ func (c *Client) dialPage(ctx context.Context) (*doubaocdp.CDP, error) {
 	defer c.mu.Unlock()
 	targets, err := doubaocdp.ListTargets(ctx, c.addr)
 	if err != nil {
-		return nil, err
+		// 端口没起：豆包常见是「开机自启、但启动命令不带调试端口」（2026-10-30 用户实测）。
+		// 这里按需以调试模式重启一次再试 —— 否则用户只能看到一个他无法自己解决的错误
+		// （双击图标带不上 --remote-debugging-port）。
+		// 有冷却限制：同一进程内失败后 60 秒内不再反复重启别人的应用。
+		if ok, rerr := c.tryRelaunch(ctx); ok {
+			if rerr != nil {
+				return nil, rerr
+			}
+			targets, err = doubaocdp.ListTargets(ctx, c.addr)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 	t := doubaocdp.PickChatTarget(targets)
 	if t == nil {
@@ -542,6 +584,12 @@ func (c *Client) UserResourceDetail(_ *auth.Auth) (int64, []provider.ResourceIte
 
 	var items []provider.ResourceItem
 	var remain int64
+	// remain 语义说明（2026-10-30 用户实测）：
+	// 本渠道额度是**窗口百分比**，不是可消耗积分。`remain` 若把各窗口剩余百分比加起来，
+	// 会得到 100+100+65=265 这种**没有意义**的数（三个窗口口径不同、不能相加），
+	// 而面板会把它当积分显示 ⇒ 与本渠道 credits_unit="percent" 自相矛盾。
+	// 故这里 remain 恒为 0：真实余量由 quota_windows 逐窗口表达（见 pool.QuotaWindow）。
+	// 保留 items 是为了让 provider.EarliestExpire / ExpiringWithinDays 等既有口径照常工作。
 	add := func(name string, used int, endMs int64) {
 		left := int64(100 - used)
 		if left < 0 {
@@ -551,7 +599,6 @@ func (c *Client) UserResourceDetail(_ *auth.Auth) (int64, []provider.ResourceIte
 			Name: name, Total: 100, Used: int64(used), Remain: left, Usable: true,
 			ExpireAt: unixMilliToRFC3339(endMs),
 		})
-		remain += left
 	}
 	for _, g := range sum.Data.WindowLimitSection.WindowLimitGroups {
 		for _, w := range g.WindowLimits {

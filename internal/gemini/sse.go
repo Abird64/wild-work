@@ -230,7 +230,10 @@ func (s *geminiStreamReader) convertLine(line []byte) []byte {
 				}
 			}
 			s.sawContent = true
-			out = append(out, s.toolCallChunks(name, string(args))...)
+			// 思考签名透传给客户端（官方 OpenAI 兼容口径：tool_call.extra_content.google.thought_signature）。
+			// 客户端保留它就能在下轮回传真签名、保住推理上下文；丢了也不致命，
+			// 请求侧会用占位签名兜底（见 signature.go）。
+			out = append(out, s.toolCallChunks(name, string(args), strOf(pm["thoughtSignature"]))...)
 			continue
 		}
 		text := strOf(pm["text"])
@@ -342,12 +345,15 @@ func (s *geminiStreamReader) chunks(delta map[string]any) []byte {
 }
 
 // toolCallChunks 下发一个工具调用（独占一个块，参数一次性给全）。
-func (s *geminiStreamReader) toolCallChunks(name, args string) []byte {
+//
+// sig 非空时按官方口径放进 `extra_content.google.thought_signature`：
+// 这是 Google 在 OpenAI 兼容层约定的承载位置，客户端原样回传即可让下一轮免校验。
+func (s *geminiStreamReader) toolCallChunks(name, args, sig string) []byte {
 	idx := s.toolCount
 	s.toolCount++
 	// 上游不提供工具调用 id，本地生成稳定可读的形式（与参考实现同构）。
 	id := "gemini_tool_" + strconv.FormatInt(nowMillisFn(), 36) + "_" + strconv.Itoa(idx)
-	return s.chunks(map[string]any{"tool_calls": []any{map[string]any{
+	call := map[string]any{
 		"index": idx,
 		"id":    id,
 		"type":  "function",
@@ -355,7 +361,13 @@ func (s *geminiStreamReader) toolCallChunks(name, args string) []byte {
 			"name":      name,
 			"arguments": args,
 		},
-	}}})
+	}
+	if sig != "" {
+		call["extra_content"] = map[string]any{
+			"google": map[string]any{"thought_signature": sig},
+		}
+	}
+	return s.chunks(map[string]any{"tool_calls": []any{call}})
 }
 
 // finish 生成收尾帧（finish_reason + usage）并附上 `data: [DONE]`。幂等：重复调用返回空。

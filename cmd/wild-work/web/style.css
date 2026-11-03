@@ -212,67 +212,73 @@ body {
 .acct-grid .acct-card.hidden { display: none; }
 
 /* 账号卡片网格 */
-.acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .acct-card {
-  border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;
-  display: flex; flex-direction: column; gap: 8px; background: var(--card);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px 14px;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 12px; background: var(--card);
+  transition: border-color .15s ease, box-shadow .15s ease;
 }
+.acct-card:hover { border-color: var(--line-2); }
 .acct-card.disabled { opacity: 0.5; background: #161320; }
-.acct-card .acct-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
-.acct-card .acct-name { font-weight: 600; font-size: 14px; }
-.acct-card .acct-uid { font-size: 11px; color: var(--muted); }
-.acct-card .acct-mid { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.acct-card .acct-credits { font-size: 18px; font-weight: 700; cursor: pointer; white-space: nowrap; }
-/* 可用/不可用/临期拆分：主数字黑色正常字号，不可用降级为次要色，临期红色醒目提示优先消耗。 */
-.acct-card .acct-credits span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 2px; }
-.acct-card .acct-credits .credit-num { font-size: 18px; font-weight: 700; color: var(--text); margin-left: 0; }
-.acct-card .acct-credits .credit-sep { margin: 0 3px; color: var(--border); }
-.acct-card .acct-credits .credit-unusable { font-size: 13px; font-weight: 600; color: var(--muted); }
-.acct-card .acct-credits .credit-expiring { font-size: 13px; font-weight: 600; color: var(--danger); }
+.acct-card .acct-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.acct-card .acct-id-group { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.acct-card .acct-name { font-weight: 600; font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-card .acct-uid { font-size: 11px; color: #6b6382; font-family: ui-monospace, Consolas, monospace; letter-spacing: .02em; }
+.acct-card .acct-mid { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.acct-card .acct-credits { font-size: 26px; font-weight: 800; cursor: pointer; white-space: nowrap; line-height: 1; display: inline-flex; align-items: baseline; gap: 4px; }
+/* 可用/不可用/临期拆分：主数字超大字号高对比呈现（26px），单位降阶 */
+.acct-card .acct-credits span { font-size: 12px; color: var(--muted); font-weight: 400; }
+.acct-card .acct-credits .credit-num { font-size: 26px; font-weight: 800; color: #fff; margin-left: 0; letter-spacing: -.02em; }
+.acct-card .acct-credits .credit-unit { font-size: 12px; color: #8e84a5; font-weight: 500; }
+.acct-card .acct-credits .credit-sep { margin: 0 4px; color: var(--border); }
+.acct-card .acct-credits .credit-unusable { font-size: 12px; font-weight: 500; color: #6b6382; }
+.acct-card .acct-credits .credit-expiring { font-size: 12px; font-weight: 600; color: var(--danger); }
+/* 百分比配额渠道（credits_unit="percent"，如 Gemini） */
+.acct-card .acct-credits .credit-pct { font-size: 16px; font-weight: 700; color: #fff; margin-left: 0; }
+.acct-card .acct-credits .credit-wsep { color: var(--border); margin: 0 4px; }
 /* 旧版 state 文件读入后余额口径不可信：显示待刷新而非旧值 */
 .acct-card .acct-credits .credit-stale {
-  font-size: 13px; font-weight: 600; color: var(--muted);
+  font-size: 14px; font-weight: 600; color: var(--muted);
   animation: stale-pulse 1.6s ease-in-out infinite;
 }
 @keyframes stale-pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
-.acct-card .acct-checkin { font-size: 11px; }
-.acct-card .acct-ops { display: flex; gap: 4px; justify-content: flex-end; }
+.acct-card .acct-checkin { font-size: 11px; margin-bottom: 2px; }
+.acct-card .acct-ops { display: flex; gap: 4px; justify-content: flex-end; align-items: center; }
 
 .badge {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10px; padding: 2px 7px 2px 5px; border-radius: 10px;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 13px; font-weight: 600; padding: 3px 9px 3px 7px; border-radius: 8px;
   color: var(--fg); white-space: nowrap;
   background: var(--badge-bg); border: 1px solid var(--line-2);
 }
-/* 渠道圆点：唯一使用 --ch 的地方，7px 小方块 */
-.badge::before { content: ""; width: 5px; height: 5px; border-radius: 2px; background: var(--ch); flex: none; }
+/* 渠道圆点：唯一使用 --ch 的地方，6px 圆点 */
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ch); flex: none; }
 /* 渠道徽章：**所有渠道共用一个底**（R99 v3）。
    渠道身份由徽章里的文字承载（chLabel() 是唯一标签源），色相不再承担第二编码。
    渠道短类名（.wb/.glm/…）在 HTML 上**保留**——applyAcctFilter 靠 data-group，
    CH_CLASS 还要用它拼类名；只是 CSS 不再为每个渠道写一条颜色规则。
    新增渠道时**不需要**再补任何颜色（原 R99「三处补齐」纪律就此取消）。 */
 
-.tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
+.tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 .tag.bad { background: #34202a; color: var(--danger); }
 .tag.ok { background: #1c2e24; color: var(--ok); }
 .tag.neutral { background: #221d2e; color: var(--muted); }
 
-/* 图标操作按钮 */
+/* 图标操作按钮：幽灵化（Ghost Icon）——无方框外描边与深底，降低日常噪点，hover 时才浮现柔和边框与底色 */
 .icon-op {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--card); color: var(--muted); cursor: pointer; font-size: 14px;
-  transition: all .15s; margin: 0 1px;
+  width: 24px; height: 24px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: #72688b; cursor: pointer; font-size: 13px;
+  transition: all .15s ease; margin: 0;
 }
-.icon-op:hover { color: var(--primary); border-color: var(--primary); background: #242038; }
-.icon-op.danger:hover { color: var(--danger); border-color: var(--danger); background: #2e1a20; }
-.icon-op.warn:hover { color: var(--warn); border-color: var(--warn); background: #262318; }
-.icon-op.off { cursor: not-allowed; color: #8e84a5; opacity: 1; } /* 不用半透明压暗：
-   叠加后实际对比无法度量（曾 2.42:1）。禁用态靠颜色降档表达，仍可如实审计。 */
-.icon-op.off:hover { color: #6b6480; border-color: var(--border); background: var(--card); }
+.icon-op:hover { color: #fff; border-color: var(--line-2); background: #242038; }
+.icon-op.danger:hover { color: var(--danger); border-color: #52202b; background: #2e1a20; }
+.icon-op.warn:hover { color: var(--warn); border-color: #4a3e1b; background: #262318; }
+.icon-op.off { cursor: not-allowed; color: #474057; opacity: 1; }
+.icon-op.off:hover { color: #474057; border-color: transparent; background: transparent; }
 /* 帮助图标：正常亮度可 hover，不可点击（无 onclick），tooltip 展示说明 */
-.icon-op.help { cursor: help; color: var(--muted); font-weight: 600; }
-.icon-op.help:hover { color: var(--primary); border-color: var(--primary); background: #242038; }
+.icon-op.help { cursor: help; color: #72688b; font-weight: 600; }
+.icon-op.help:hover { color: var(--primary); border-color: var(--line-2); background: #242038; }
 
 /* 冷却标签 + 冷却卡片（账号被挑号跳过时给出可见提示，避免"积分很多却报错"的困惑） */
 .tag.warn { background: #2e2a18; color: var(--warn); }
@@ -354,6 +360,21 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 /* 签到时间（设置弹层内） */
 .times-wrap {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1; min-width: 0;
+}
+
+/* 渠道接入网格（设置页）：去除孤立与密集符号，紧凑自适应排布 */
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px 10px;
+  margin-top: 8px;
+}
+.channel-grid .btn { justify-self: stretch; white-space: nowrap; font-size: 12px; padding: 7px 10px; }
+@media (max-width: 1100px) {
+  .channel-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-width: 779px) {
+  .channel-grid { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
 }
 .times { display: contents; }
 .time-chip {
@@ -1068,9 +1089,13 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .table .empty-cell { text-align: center; color: var(--muted); padding: 18px; }
 
 /* 主面板双 Tab（账号管理 / 用量与流水） */
-.main-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.main-tabs-wrap { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); margin-bottom: 14px; gap: 12px; }
+.main-tabs { display: flex; gap: 2px; }
 .mtab { border: 0; background: transparent; padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .mtab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+.home-top-ops { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.home-top-ops .btn { font-size: 12px; padding: 5px 12px; }
 
 .pager { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; justify-content: center; }
 .pager .pg-info { font-size: 12px; color: var(--muted); min-width: 48px; text-align: center; }

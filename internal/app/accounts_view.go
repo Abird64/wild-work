@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"wild-work/internal/backuplink"
 	"wild-work/internal/config"
@@ -33,8 +34,14 @@ type AccountView struct {
 	// 前端据此把它渲染成「Token 计数」面板（文案/单位/合计口径都随之切换），
 	// 且**不并入积分合计**——即「与积分分开统计和显示」（用户 2026-10-17 的要求）。
 	CreditsUnit string `json:"credits_unit,omitempty"`
-	Cooling     bool   `json:"cooling"`
-	Until       string `json:"until"`
+	// QuotaWindows 百分比配额窗口（credits_unit="percent" 时才有值）。
+	//
+	// 为什么必须随 state 下发而不是让前端逐个拉详情：账号卡片是首屏渲染，
+	// 每卡一次异步请求会把「30 个账号」变成 30 个并行请求；而窗口数据本来就在
+	// 积分刷新的同一次上游响应里（见 creditSnapshot），顺手存下来成本几乎为零。
+	QuotaWindows []QuotaWindowView `json:"quota_windows,omitempty"`
+	Cooling      bool              `json:"cooling"`
+	Until        string            `json:"until"`
 	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」——
 	// until 文案是 "01-02 15:04"（24h 制），跨零点的次日 07:07 极易被误读成
 	// 「19 点被显示成 7 点」；带相对时长后（issue：24h 制统一）歧义即消除。
@@ -58,6 +65,14 @@ type AccountView struct {
 	// 面板据此显示**持久**徽标（原先只在导入那一刻弹一次提示文字，事后无从复查）。
 	RefreshTokenMissing       bool   `json:"refresh_token_missing,omitempty"`
 	RefreshTokenMissingReason string `json:"refresh_token_missing_reason,omitempty"`
+}
+
+// QuotaWindowView 百分比配额窗口的面板形状。
+type QuotaWindowView struct {
+	Name    string `json:"name"`
+	Percent int    `json:"percent"`
+	// ResetAt 窗口重置时刻（RFC3339，空 = 上游未给）。
+	ResetAt string `json:"reset_at,omitempty"`
 }
 
 // State Web UI 初始数据。
@@ -200,6 +215,7 @@ func (a *App) accountViews() []AccountView {
 			// 匿名与自定义渠道无积分：前端据此显示「不适用」
 			CreditsNA:                 a.creditsNAKind(group),
 			CreditsUnit:               a.creditsUnit(group),
+			QuotaWindows:              quotaWindowViews(a.quotaWindows(group, s.UID)),
 			Cooling:                   s.Cooling,
 			Until:                     fmtTime(s.Until),
 			UntilTS:                   unixOrZero(s.Until),
@@ -308,4 +324,37 @@ var channelOrder = map[provider.Kind]int{
 	provider.ZCode:     12,
 	provider.Gemini:    13,
 	provider.CodeArts:  14,
+}
+
+// quotaWindows 取某账号的百分比窗口快照（非百分比渠道返回 nil）。
+//
+// 只对 credits_unit="percent" 的渠道读：其他渠道的 pool 里即便残留空切片也不该下发，
+// 免得前端要额外判「这个渠道到底支不支持百分比」。
+func (a *App) quotaWindows(group, uid string) []pool.QuotaWindow {
+	if a.creditsUnit(group) != "percent" {
+		return nil
+	}
+	a.runtimesMu.RLock()
+	rt := a.runtimes[provider.Kind(group)]
+	a.runtimesMu.RUnlock()
+	if rt == nil || rt.Pool == nil {
+		return nil
+	}
+	return rt.Pool.QuotaWindows(uid)
+}
+
+// quotaWindowViews 把 pool 形状转成面板形状（时间统一成 RFC3339，空值留空）。
+func quotaWindowViews(ws []pool.QuotaWindow) []QuotaWindowView {
+	if len(ws) == 0 {
+		return nil
+	}
+	out := make([]QuotaWindowView, 0, len(ws))
+	for _, w := range ws {
+		v := QuotaWindowView{Name: w.Name, Percent: w.Percent}
+		if !w.ResetAt.IsZero() {
+			v.ResetAt = w.ResetAt.Format(time.RFC3339)
+		}
+		out = append(out, v)
+	}
+	return out
 }

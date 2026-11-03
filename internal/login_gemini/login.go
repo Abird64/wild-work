@@ -50,12 +50,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/gemini"
 )
 
@@ -76,9 +76,42 @@ var (
 // 少等 1 分钟，不会让流程出错。
 const flowTTL = 6 * time.Minute
 
+// FlowTTL 导出给 app 的 loginFlows 表用（pollTimeout）。
+//
+// 为什么必须由 app 侧跟着放长（2026-10-30）：app 的通用 `loginTimeout` 是 **5 分钟**，
+// 比本包的 6 分钟短 ⇒ app 先到期并报「登录超时（未收到授权回调）」，而**真正带原因**
+// 的那句（本包 flowTTL 分支会附上最近一次传输层失败）永远没机会出现。
+// 用户只能看到一个没有线索的超时。
+func FlowTTL() time.Duration { return flowTTL }
+
 // domainConst 写进 auth 文件的 domain 字段。本渠道的协议里**没有**该字段，它纯粹是本工具
 // auth 格式的一部分（同 minimax-"minimax.cn" / lobsterai 的口径）。
 const domainConst = "cloudcode-pa.googleapis.com"
+
+// transient 记录「最近一次传输层失败」的原因，供超时文案在最后如实报出。
+//
+// 只为「让超时不再是无线索的」而存在：网络抖动时轮询会继续（见 Poll），
+// 但若最终真的超时，用户需要知道**是被什么挡住的**（代理没起？端口填错？DNS？）。
+var transientMu sync.Mutex
+var transientErr string
+
+func setTransient(err error) {
+	if err == nil {
+		return
+	}
+	transientMu.Lock()
+	transientErr = err.Error()
+	transientMu.Unlock()
+}
+
+// takeTransient 取出并清空（超时文案消费一次）。
+func takeTransient() string {
+	transientMu.Lock()
+	defer transientMu.Unlock()
+	s := transientErr
+	transientErr = ""
+	return s
+}
 
 // ErrPending 表示授权尚未完成（与 login_qwenwork / login_lobsterai 同名同义，
 // app.pollLogin 用 errors.Is 判定）。
@@ -129,6 +162,13 @@ type state struct {
 	AuthURL      string `json:"authUrl"`
 	// CreatedAt 是 Start 时刻（Unix 秒），用于 flowTTL 超时判定。
 	CreatedAt int64 `json:"createdAt"`
+	// CodeVerifier 是 PKCE 的 verifier（RFC 7636），仅 Antigravity 家族使用。
+	//
+	// ⚠️ 必须**落盘**而不是只放内存：登录是「Start 写 state → 用户去浏览器 → 回调 → Poll」
+	// 的多轮交互，进程重启/面板轮询走的是不同调用栈，放内存会在重启后丢掉，
+	// 那时换码必报 `invalid_grant: code_verifier` 且用户完全看不出原因。
+	// 它本身不是凭据（一次性、与本次 code 绑定、用完即随 state 一起删除），落盘风险可接受。
+	CodeVerifier string `json:"codeVerifier,omitempty"`
 }
 
 // pendingCode 本机回调收到的授权码（内存通道）。
@@ -160,7 +200,16 @@ var (
 )
 
 // NewClient 返回登录用 HTTP 客户端（与其它 login_* 同形：30s 总超时兜底）。
-func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
+//
+// ⚠️ 必须经**备用上游通道**出站（已配置时）：登录链要打两个 Google 端点
+// （`oauth2.googleapis.com/token` 换码、`www.googleapis.com/oauth2/v2/userinfo` 取身份），
+// 国内直连必超时（本机实测 25s 全 timeout）。旧实现这里是裸 `&http.Client{}`，
+// 于是出现**最费解的形态**：授权页在浏览器里打开了、用户也点了同意，回本机回调
+// 却永远换不到码（面板一直「授权中」直到超时）。判据与数据面同源（gemini.router），
+// 两边一旦分叉就会出现「登录能过、对话 502」或反之。
+func NewClient() *http.Client {
+	return gemini.Outbound(&http.Client{Timeout: 30 * time.Second})
+}
 
 // ErrOAuthClientMissing 未获取到 Google OAuth 客户端凭据。
 //
@@ -171,16 +220,25 @@ func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 // ⚠️ 这条文案是**用户唯一能看到的解释**：前端拿到 /api/login/start 的错误后只弹一个 toast，
 // 没有其它排查入口。故必须写出「怎么查 / 怎么补」，而不能只丢两个变量名
 // （2026-10-17 现场：用户照着旧文案设了变量仍然失败——既没说值从哪来，也没说回调地址要登记）。
-var ErrOAuthClientMissing = errors.New(
-	"未获取到 Google OAuth 客户端凭据（点「＋Gemini」失败的直接原因）：" + gemini.EnvClientID +
-		" 与 " + gemini.EnvClientSecret + " 均未设置，且本机未找到可提取的官方 CLI：\n" +
-		"· 二选一即可：① 安装官方 CLI —— npm install -g @google/gemini-cli（或 @google/antigravity），" +
-		"装完点「取消」再重新点「＋Gemini」；② 自建 OAuth 客户端 —— 在 console.cloud.google.com 建「桌面应用」类型客户端，" +
-		"并把回调地址登记为 http://" + gemini.RedirectHost + ":" + strconv.Itoa(gemini.DefaultCallbackPort) + gemini.CallbackPath +
-		"（⚠️ 必须写 localhost，不能写 127.0.0.1；默认用随机端口，该端口是端口被占时的兜底），" +
-		"再把拿到的两枚值设为上述环境变量后**重启本工具**（凭据只在进程启动时读取一次）。\n" +
-		"· 已查过的本机位置：" + strings.Join(gemini.OAuthClientSearchRoots(), "；") + "\n" +
-		"· 若要核对环境变量是否真的生效，可设置 " + EnvDiagnoseOnStart + "=1 后重启查看日志。")
+// ErrOAuthClientMissing 是「拿不到凭据」的**哨兵值**，供 errors.Is 判定。
+//
+// ⚠️ 它**只承载身份**，不承载文案：文案要含「本次实际扫过哪些目录」，而扫描结果在
+// 解析时才产生。原实现把整段文案放进包级 `errors.New(...)`，包初始化那一刻
+// `OAuthClientSearchRoots()` 还是空的 ⇒ 用户看到的永远是「已查过的本机位置：」（空），
+// 等于白写一行。现在改由 oauthClientMissingErr() 在**返回错误时**现拼。
+var ErrOAuthClientMissing = errors.New("未获取到 Google OAuth 客户端凭据")
+
+// oauthClientMissingErr 生成带完整排查指引的错误（文案是用户唯一能看到的解释）。
+func oauthClientMissingErr() error {
+	return fmt.Errorf("%w（点「＋Gemini」失败的直接原因）：%s 与 %s 均未设置，且本机未找到可提取的官方 CLI：\n"+
+		"· 正常情况下不该走到这里 —— 内置的 Antigravity 客户端本应恒可用；若确实为空，"+
+		"可用 %s / %s 覆盖，或安装官方 CLI（npm install -g @google/antigravity）。\n"+
+		"· 已查过的本机位置：%s\n"+
+		"· 若要核对环境变量是否真的生效，可设置 %s=1 后重启查看日志。",
+		ErrOAuthClientMissing,
+		gemini.EnvClientID, gemini.EnvClientSecret, gemini.EnvClientID, gemini.EnvClientSecret,
+		strings.Join(gemini.OAuthClientSearchRoots(), "；"), EnvDiagnoseOnStart)
+}
 
 // EnvDiagnoseOnStart 置为 "1" 时，本工具在每次发起的登录里记一行诊断日志
 // （凭据是否就绪、取自 env 还是本机 CLI、扫描过哪些位置）。**不含任何凭据值**。
@@ -214,9 +272,24 @@ var ErrGoogleUnreachable = errors.New(
 	"无法连接 Google 授权服务器（" + hostOfURL(gemini.TokenEndpoint) + "）：本机网络到 Google 不可达。" +
 		"这不是账号或授权码的问题 —— 请先确认能访问 Google（需要代理时先让本工具走代理），再重新点「＋Gemini」")
 
+// unreachableHint 在「网络不可达」时补一句**当前出口到底是什么**。
+//
+// 为什么需要（2026-10-30 现场）：用户按提示去配了备用通道，但填的是
+// `socks5://127.0.0.1:1080`（该端口根本没在听），而机器上真正可用的是
+// `127.0.0.1:7890`。原文案只说「本机网络到 Google 不可达」，用户看着「已生效」
+// 的绿点会以为自己配对了，只能反复重试。判据必须点名：
+//   - 没配 → 直连，请去「其他」页填代理；
+//   - 配了 → 报出**实际生效的地址**，让他核对端口/协议是否与代理客户端一致。
+func unreachableHint() string {
+	if raw := backuplink.Raw(); raw != "" {
+		return "（当前出口：备用上游通道 " + raw + " —— 若代理客户端实际监听的不是这个端口/协议，请到「其他」页改正后保存）"
+	}
+	return "（当前出口：直连 —— 请到「其他」页的「备用上游通道」填写代理地址，例如 http://127.0.0.1:7890）"
+}
+
 // networkError 把连接层失败包装成可由 errors.Is 识别的 ErrGoogleUnreachable。
 func networkError(host string, cause error) error {
-	return fmt.Errorf("%w（%s：%v）", ErrGoogleUnreachable, host, cause)
+	return fmt.Errorf("%w %s（%s：%v）", ErrGoogleUnreachable, unreachableHint(), host, cause)
 }
 
 // hostOfURL 取 URL 的 host，用于错误文案（解析失败时回落为原文）。
@@ -232,7 +305,7 @@ func Start(_ *http.Client, statePath string) (string, error) {
 	// 先确认拿到了 OAuth 客户端凭据。**放在监听之前**——否则会白占一个回调端口再报错。
 	if gemini.ClientID() == "" || gemini.ClientSecret() == "" {
 		logOAuthDiagnosis("缺失")
-		return "", ErrOAuthClientMissing
+		return "", oauthClientMissingErr()
 	}
 	logOAuthDiagnosis("就绪")
 	// ⚠️ 顺序：先监听、再拼 URL（协议 §2.3 第 2 条：先拼 URL 会在换端口时 redirect_uri_mismatch）。
@@ -241,13 +314,28 @@ func Start(_ *http.Client, statePath string) (string, error) {
 		return "", err
 	}
 	stateVal := randomState()
-	redirectURI := fmt.Sprintf("http://%s:%d%s", gemini.RedirectHost, port, gemini.CallbackPath)
+	// redirect 形态、scope、PKCE 三者必须同源（同一个客户端家族），见 gemini.ActiveRedirect。
+	redirHost, redirPath := gemini.ActiveRedirect()
+	redirectURI := fmt.Sprintf("http://%s:%d%s", redirHost, port, redirPath)
+
+	// PKCE（Antigravity 家族必需）。verifier 落盘，见 state.CodeVerifier 注释。
+	verifier, challenge := "", ""
+	if gemini.ActiveNeedsPKCE() {
+		v, c, perr := newPKCE()
+		if perr != nil {
+			closeAll(lns)
+			return "", perr
+		}
+		verifier, challenge = v, c
+	}
+
 	st := state{
 		State:        stateVal,
 		RedirectURI:  redirectURI,
 		CallbackPort: port,
-		AuthURL:      buildAuthURL(stateVal, redirectURI),
+		AuthURL:      buildAuthURL(stateVal, redirectURI, challenge),
 		CreatedAt:    time.Now().Unix(),
+		CodeVerifier: verifier,
 	}
 	if err := writeState(statePath, st); err != nil {
 		closeAll(lns)
@@ -256,7 +344,7 @@ func Start(_ *http.Client, statePath string) (string, error) {
 
 	sess := &loginSession{state: st}
 	mux := http.NewServeMux()
-	mux.HandleFunc(gemini.CallbackPath, sess.handleCallback)
+	mux.HandleFunc(redirPath, sess.handleCallback)
 	sess.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	sess.lns = lns
 
@@ -280,7 +368,12 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 	if st.CreatedAt > 0 && time.Since(time.Unix(st.CreatedAt, 0)) > flowTTL {
 		Shutdown()
 		_ = os.Remove(statePath)
-		return Result{}, errors.New("登录超时（6 分钟未收到授权回调），请重新发起")
+		msg := "登录超时（6 分钟未收到授权回调），请重新发起"
+		if last := takeTransient(); last != "" {
+			// 有传输层失败记录时一并报出：否则用户只知道「超时」，不知道是被网络挡住的。
+			msg += "；期间换码失败：" + last
+		}
+		return Result{}, errors.New(msg)
 	}
 
 	sess := currentSession()
@@ -304,9 +397,17 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 			// 已经拿到 HTTP 响应：授权码很可能已被消费，重试没有意义。
 			Shutdown()
 			_ = os.Remove(statePath)
+			return Result{}, err
 		}
-		// 传输层失败（可能只是抖动）：保留 state，轮询继续；app 侧 6 分钟窗口兜底。
-		return Result{}, err
+		// 传输层失败（网络抖动 / 代理刚起 / DNS 瞬时失败）：**保留 state，继续轮询**。
+		//
+		// 这里原先是 `return Result{}, err` —— 与注释的意图相反：wrapPoll 见到非
+		// ErrPending 的错误会映射成「终态」，app 立刻放弃轮询。于是「代理晚起 20，
+		// 秒」或「DNS 抖一下」都会让整条已经拿到 code 的授权**当场作废**，用户得从头
+		// 再点一次「＋Gemini」（2026-10-30 现场：连续两次都是 30 秒整点失败）。
+		// 授权码此刻**尚未**被消费（请求根本没到 Google），重试完全安全。
+		setTransient(err)
+		return Result{}, ErrPending
 	}
 	Shutdown()
 	_ = os.Remove(statePath)
@@ -345,6 +446,12 @@ func exchange(client *http.Client, st state, code string) (Result, bool, error) 
 	form.Set("code", code)
 	form.Set("grant_type", "authorization_code")
 	form.Set("redirect_uri", st.RedirectURI)
+	// PKCE：授权时有 challenge 就必须在换码时回传对应 verifier，否则上游回
+	// `invalid_grant: Missing code verifier`。两者必须同源（都来自 st），
+	// 不能一处读 state、一处现生成。
+	if st.CodeVerifier != "" {
+		form.Set("code_verifier", st.CodeVerifier)
+	}
 
 	req, err := http.NewRequest(http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -608,17 +715,37 @@ func extraOf(r Result) map[string]string {
 // `access_type=offline` + `prompt=consent` 是 refresh_token 的必要条件。
 //
 // ⚠️ **无 PKCE**：不产生 `code_challenge` / `code_verifier`（协议 §2.3 明确「刻意去掉」）。
-func buildAuthURL(stateVal, redirectURI string) string {
+func buildAuthURL(stateVal, redirectURI, pkceChallenge string) string {
 	q := url.Values{}
 	q.Set("client_id", gemini.ClientID())
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", redirectURI)
-	q.Set("scope", strings.Join(gemini.Scopes, " "))
+	// scope 按客户端家族取：往 CLI 客户端塞内部 scope 必被回 restricted_client。
+	q.Set("scope", strings.Join(gemini.ActiveScopes(), " "))
 	q.Set("state", stateVal)
 	q.Set("access_type", "offline")
 	q.Set("include_granted_scopes", "true")
 	q.Set("prompt", "consent")
+	if pkceChallenge != "" {
+		q.Set("code_challenge", pkceChallenge)
+		q.Set("code_challenge_method", "S256")
+	}
 	return authEndpoint + "?" + q.Encode()
+}
+
+// newPKCE 生成 PKCE 的 (verifier, challenge)（RFC 7636 §4.1/4.2）。
+//
+// verifier = 32 字节随机数的 base64url（无填充）= 43 字符，落在规范要求的 43~128 内；
+// challenge = base64url(sha256(verifier))，方法固定 S256（plain 不被上游接受）。
+func newPKCE() (verifier, challenge string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("生成 PKCE 随机数失败：%w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
 }
 
 // randomState 生成 state：randomBytes(16) 的 hex（**32 个 hex 字符**，协议 §2.3）。

@@ -1334,6 +1334,62 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
 
 // ---- 输出 ----
 let failed = 0;
+  // ---- 场景 9：「其他」页表单回填必须覆盖「点页签直达」这条入口（2026-10-30 现场缺陷）----
+  // 缺陷形态：回填逻辑只写在 openSettings()（只绑顶栏 ⚙），用户点「其他」页签直达时不走它
+  // ⇒ `#inPort` 为空 ⇒ `parseInt("")` = NaN ⇒ `JSON.stringify` 变 `null` ⇒ 后端收 0
+  // ⇒「端口无效：0」，且 SetListen 在保存流程第 1 步，把后面的备用通道配置一并阻断。
+  // 用户当时只是想配代理，却卡在一个他根本没改过的字段上。
+  {
+    const settings = readFileSync(new URL("app-settings.js", _webDir), "utf8");
+    const home = readFileSync(new URL("app-home.js", _webDir), "utf8");
+    const models = readFileSync(new URL("app-models.js", _webDir), "utf8");
+    check(
+      "S9：表单回填抽成独立 renderSettingsForm（不再只藏在 openSettings 里）",
+      /function renderSettingsForm\s*\(/.test(settings)
+    );
+    check(
+      "S9：renderSettingsForm 里**真的**回填了 inPort（非注释、非改名）",
+      /\$\("inPort"\)\.value\s*=\s*state\.listen_port/.test(settings)
+    );
+    check(
+      "S9：showMainTab 切到 other 时调用 renderSettingsForm（页签直达也回填）",
+      /if\s*\(\s*t\s*===\s*"other"\s*\)\s*\{[^}]*renderSettingsForm\(\)/s.test(home)
+    );
+    check(
+      "S9：saveSettings 对端口做了有限性校验（NaN 不得进 JSON）",
+      /Number\.isFinite\(port\)/.test(models) && /port\s*>\s*65535/.test(models)
+    );
+    check(
+      "S9：saveSettings 在端口框为空时先补回填（防缺陷复发）",
+      /if\s*\(\s*!\$\("inPort"\)\.value\s*\)\s*renderSettingsForm\(\)/.test(models)
+    );
+  }
+
+// ---- 场景 10：百分比配额渠道的展示（2026-10-30 用户实测）----
+// 现场：Gemini 额度满格（5 小时 100% / 周 100%），面板却显示「0 可用积分」，
+// 看起来像额度耗尽。根因是这类渠道的 UserResource 恒返回 0（额度是窗口百分比）。
+// 守的是「别再把它渲染成积分数」以及「多个窗口不要用积分那种 18px 主数字」。
+{
+  const render = readFileSync(new URL("app-render.js", _webDir), "utf8");
+  const css = readFileSync(new URL("style.css", _webDir), "utf8");
+  check(
+    "S10：creditsText 认 percent 口径并按窗口渲染",
+    /credits_unit === "percent"/.test(render) && /quota_windows/.test(render)
+  );
+  check(
+    "S10：percent 分支在 token/积分分支**之前**（否则被前面的分支截走）",
+    render.indexOf('credits_unit === "percent"') < render.indexOf('credits_unit === "token"')
+  );
+  check(
+    "S10：没有窗口时显示「待刷新」而不是编造 0%",
+    /percent[\s\S]{0,400}待刷新/.test(render)
+  );
+  check(
+    "S10：百分比用 credit-pct 小字号（不能用积分那种 18px 主数字撑破卡片）",
+    /"credit-pct"/.test(render) && /\.acct-card \.acct-credits \.credit-pct/.test(css)
+  );
+}
+
 for (const [name, pass, extra] of results) {
   console.log(`  ${pass ? "✅" : "❌"} ${name}${extra && !pass ? "  → " + extra : ""}`);
   if (!pass) failed++;

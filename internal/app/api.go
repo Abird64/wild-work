@@ -54,6 +54,8 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/account/checkin_all", a.apiAccountCheckinAll)
 	mux.HandleFunc("POST /api/account/refresh", a.apiAccountRefresh)
 	mux.HandleFunc("POST /api/account/refresh_all", a.apiAccountRefreshAll)
+	// 豆包桥接：把「以调试模式拉起客户端」变成面板可点的动作（2026-10-30）。
+	mux.HandleFunc("POST /api/doubao/connect", a.apiDoubaoConnect)
 	mux.HandleFunc("POST /api/account/remove", a.apiAccountRemove)
 	mux.HandleFunc("POST /api/account/disable", a.apiAccountDisable)
 	mux.HandleFunc("POST /api/account/resource_detail", a.apiAccountResourceDetail)

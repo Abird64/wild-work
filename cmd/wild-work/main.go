@@ -36,7 +36,6 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/devdump"
-	"wild-work/internal/doubao"
 	"wild-work/internal/doubaowork"
 	"wild-work/internal/gateway"
 	"wild-work/internal/gemini"
@@ -204,7 +203,11 @@ func main() {
 	// 豆包工作：凭据就是本机客户端浏览器里的登录态（含 httpOnly 的 sessionid），
 	// 本工具**不落任何 token** —— 连 auth 文件里都没有可泄露的东西。
 	// 同样只有一个虚拟账号，不经目录扫描、不参与 reload（与 oczen 同款装配）。
-	dbChatAuths := []*auth.Auth{doubao.ClientAuth()}
+	// 豆包（普通对话）已下线（2026-10-30 用户决议）：与「豆包工作」共用同一个客户端、
+	// 同一份账号额度，而后者功能更全（含工作会话）。两条并存只会让面板出现两张
+	// 指向同一账号的卡片、签到/额度记两遍。故不再注册 doubao 运行时；
+	// internal/doubao 包保留（协议实现与 doubaocdp 共用，删掉反而丢失取证记录）。
+	// 存量 state-doubao.json 留在磁盘上无害（不注册就不会被读取/上报）。
 	// 豆包工作（工作任务）：与豆包共用同一个客户端与调试端口，但账号标识独立，
 	// 免得两个渠道的冷却状态互相牵连。同样零凭据落盘。
 	dbWorkAuths := []*auth.Auth{doubaowork.ClientAuth()}
@@ -317,14 +320,6 @@ func main() {
 	}
 	kiPool.SetDisabled(kilo.AnonymousUID, false)
 	kiPool.ClearPenalty(kilo.AnonymousUID)
-	// doubao（普通对话）：单账号渠道（一个客户端 = 一个登录态），state 只记冷却。
-	// 启动时自愈：任何历史脏数据（冷却/禁用）都会让这条没有第二个账号的渠道直接下线。
-	dbChatPool := pool.New(filepath.Join(stateDir, "state-doubao.json"))
-	for _, a := range dbChatAuths {
-		dbChatPool.Add(a)
-	}
-	dbChatPool.SetDisabled(doubao.ClientUID, false)
-	dbChatPool.ClearPenalty(doubao.ClientUID)
 	dbWorkPool := pool.New(filepath.Join(stateDir, "state-doubaowork.json"))
 	for _, a := range dbWorkAuths {
 		dbWorkPool.Add(a)
@@ -400,7 +395,6 @@ func main() {
 	// 签名由前端 hook 注入。因此没有 HTTP client 可配，也没有 StreamHTTP 超时语义：
 	// R35「流式必须独立 StreamHTTP 且不设 Timeout」在本渠道不适用，
 	// 流式超时改由 CDP 事件静默判定（见 doubao.pump 的 idle/hard 双闸）。
-	dbChatUp := doubao.New("")
 	// 豆包工作：同一条 CDP 通道，但每条请求会多走「建会话 → modify → 发消息 → 删会话」
 	// 四步页面内 fetch（见 internal/doubaowork/work.go）。
 	dbWorkUp := doubaowork.New("")
@@ -562,8 +556,6 @@ func main() {
 	// **KeepaliveHours 必须显式空切片**（R39）：保活会发一条**真实对话**，既污染客户端会话列表、
 	// 又真花额度，而这两条渠道没有任何需要续期的 token（凭据在客户端浏览器里）。
 	// 签到是**账号级**活动：两渠道打同一个端点，上游 idempotent，多一次调用不会重复发放。
-	dbChatSch := scheduler.New(scheduler.Config{Pool: dbChatPool, Upstream: dbChatUp, Name: "doubao",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	dbWorkSch := scheduler.New(scheduler.Config{Pool: dbWorkPool, Upstream: dbWorkUp, Name: "doubaowork",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
@@ -637,11 +629,6 @@ func main() {
 		// NoCooldownOnServerError 保留（语义已被 SingleAccount 涵盖，留着不依赖顺序）。
 		provider.Oczen: {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, StaticModels: oczen.StaticModels(),
 			SingleAccount: true, NoCooldownOnServerError: true},
-		// doubao（普通对话）：单账号渠道 ⇒ SingleAccount（任何账号级惩罚都等于整条渠道下线）。
-		// 与 oczen/kilo 的区别：它有**真实登录态**，会话失效必须能被看见并修复（R76/R96），
-		// 所以不置 NoCooldownOnServerError，ErrSessionDead 仍走可自愈标记而非永久禁用。
-		provider.Doubao: {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp,
-			StaticModels: doubao.StaticModels(), SingleAccount: true},
 		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp,
 			StaticModels: doubaowork.StaticModels(), SingleAccount: true},
 		// kilo：同为无账号渠道（免密免费池，虚拟账号不可重登），语义与 oczen 一致——
@@ -676,15 +663,13 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
-		// doubao（普通对话）：已接每日签到（landing/checkin），调度器只排签到、不排保活。
-		provider.Doubao:     {Kind: provider.Doubao, Pool: dbChatPool, Upstream: dbChatUp, Scheduler: dbChatSch},
-		provider.Doubaowork: {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp, Scheduler: dbWorkSch},
-		provider.Kilo:       {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
-		provider.Minimax:    {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
-		provider.LobsterAI:  {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
-		provider.ZCode:      {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
-		provider.Gemini:     {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
-		provider.CodeArts:   {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
+		provider.Doubaowork:  {Kind: provider.Doubaowork, Pool: dbWorkPool, Upstream: dbWorkUp, Scheduler: dbWorkSch},
+		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
+		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
+		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.ZCode:       {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
+		provider.Gemini:      {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
+		provider.CodeArts:    {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
 	}
 
 	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir, upstreamTimeout)
@@ -722,8 +707,6 @@ func main() {
 	oaSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("officeace", r) })
 	oaSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("officeace", uid, ok, msg) })
 	// 豆包系：签到结果同样要过观察者 —— 面板「签到成功/失败」标签与 stats 的签到收入都读它。
-	dbChatSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubao", r) })
-	dbChatSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubao", uid, ok, msg) })
 	dbWorkSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubaowork", r) })
 	dbWorkSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubaowork", uid, ok, msg) })
 

@@ -26,7 +26,7 @@ import (
 // 返回值：contents、systemTexts、错误。system 走顶层 systemInstruction（见 buildInternalBody）——
 // 本仓内层协议是 OpenAI Chat，system 恰恰**只在** messages 里；直接按参考实现「跳过 system」
 // 会把系统提示词整段丢掉（与 minimax messages.go 规则 6 的同款偏差说明）。
-func translateMessages(raw any) ([]content, []string, error) {
+func translateMessages(raw any, forceSentinel bool) ([]content, []string, error) {
 	list, _ := raw.([]any)
 
 	// ---- 第一遍：全消息扫 tool_call_id → name 映射与配对集合 ----
@@ -132,6 +132,12 @@ func translateMessages(raw any) ([]content, []string, error) {
 			continue
 		}
 		out = append(out, content{Role: upstreamRole, Parts: parts})
+	}
+	// 思考签名回填：当前轮每一步的第一个 functionCall 必须带签名，否则上游 400
+	// （2026-11-03 用户实测；规则与占位签名见 signature.go）。
+	ensureSignatures(out)
+	if forceSentinel {
+		forceSentinelSignatures(out)
 	}
 	return out, sysTexts, nil
 }
@@ -420,7 +426,11 @@ func isToolError(m map[string]any) bool {
 	return false
 }
 
-// functionCallPart 把一条 tool_call 转成 functionCall part。
+// functionCallPart 把一条 tool_call 转成 functionCall part（带思考签名）。
+//
+// 签名来自客户端的 `extra_content.google.thought_signature`（官方 OpenAI 兼容口径）。
+// 客户端没保留时留空，由 ensureSignatures 在末尾统一补占位签名 —— 不能在这里补，
+// 因为「当前轮每一步只补第一个 FC」需要看到整段 contents 才知道步骤边界。
 func functionCallPart(c map[string]any) (part, bool) {
 	name := toolCallNameOf(c)
 	if name == "" {
@@ -430,7 +440,10 @@ func functionCallPart(c map[string]any) (part, bool) {
 	if err != nil {
 		args = alphaJSON("{}")
 	}
-	return part{FunctionCall: &functionCall{Name: name, Args: args}}, true
+	return part{
+		FunctionCall:     &functionCall{Name: name, Args: args},
+		ThoughtSignature: sanitizeSignature(thoughtSignatureOf(c)),
+	}, true
 }
 
 // parseArguments 解析 tool_call 的参数：`function.arguments`（JSON **字符串**，OpenAI 惯例）

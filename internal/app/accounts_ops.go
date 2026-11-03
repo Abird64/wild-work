@@ -413,6 +413,19 @@ func (a *App) creditsUnit(group string) string {
 	if group == provider.ZCode.String() {
 		return "token"
 	}
+	// 百分比配额（2026-10-30 用户实测）：这类渠道的额度是「窗口剩余百分比」，
+	// `UserResource` 恒返回 0 ⇒ 面板只能显示「0 积分」，看着像额度耗尽，
+	// 实际可能满格。标成 "percent" 让卡片改显示窗口百分比（数据见 quota_windows）。
+	// 百分比配额（2026-10-30 用户实测）：这类渠道的额度是「窗口剩余百分比」，
+	// `UserResource` 恒返回 0 ⇒ 面板只能显示「0 积分」，看着像额度耗尽，
+	// 实际可能满格。标成 "percent" 让卡片改显示窗口百分比（数据见 quota_windows）。
+	//
+	// 豆包两条渠道共用同一个客户端的同一份额度（同一个账号、同一个接口）：
+	// 5 小时窗口 / 7 天窗口 / 活动赠送额度，全部是 used_percent 形态。
+	if group == provider.Gemini.String() ||
+		group == provider.Doubao.String() || group == provider.Doubaowork.String() {
+		return "percent"
+	}
 	return "" // 积分（credits）
 }
 

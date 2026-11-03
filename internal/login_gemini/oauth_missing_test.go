@@ -71,6 +71,9 @@ func clearOAuthClientEnv(t *testing.T) {
 // 更糟的是，它连「本机到底查了哪些位置」都不说，用户无从判断是不是装错了目录。
 func TestStartMissingOAuthClientIsActionable(t *testing.T) {
 	clearOAuthClientEnv(t)
+	// R135：内置 Antigravity 凭据恒非空，必须显式清掉才能构造「完全拿不到凭据」的场景。
+	restoreBuiltin := gemini.SetBuiltinClientForTest("", "")
+	t.Cleanup(restoreBuiltin)
 	if gemini.ClientID() != "" || gemini.ClientSecret() != "" {
 		t.Fatalf("前提不成立：本用例要求 ClientID/ClientSecret 为空，实际 %q/%q",
 			gemini.ClientID(), gemini.ClientSecret())
@@ -99,11 +102,16 @@ func TestStartMissingOAuthClientIsActionable(t *testing.T) {
 		t.Errorf("文案应列出扫描过的 CLI 路径，实际：%s", msg)
 	}
 	// ② 必须给出**可执行**的获取途径，而不只是变量名。
+	//
+	// R135 调整：默认客户端是**内置的 Antigravity**，走到这条错误说明连内置值都没了
+	// （异常状态）。此时真正可执行的只有「用 env 覆盖」与「装官方 CLI 让它被提取」，
+	// 故保留这两项；「自建 OAuth 客户端要登记 localhost/随机端口」那套只对 CLI 家族成立、
+	// 且当前不是推荐路径，不再作为硬要素（它仍写在 docs 里）。
 	for _, want := range []string{
-		"npm install",              // 装官方 CLI（自动提取）
-		"console.cloud.google.com", // 自建 OAuth 客户端
-		gemini.CallbackPath,        // 回调地址必须注册成 /oauth-callback
-		"随机端口",                     // 回调端口是动态的，用户得知道要登记 http://localhost
+		gemini.EnvClientID,     // 用 env 覆盖
+		gemini.EnvClientSecret, // 同上
+		"npm install",          // 装官方 CLI（可被提取）
+		"Antigravity",          // 说清默认客户端是哪一家
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("文案缺少可操作要素 %q，实际：%s", want, msg)

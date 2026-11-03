@@ -242,11 +242,25 @@ async function startLogin(channel, accountLabel) {
     // 想全自动：把该端口固定（config.login.lobsterai_callback_port）并在浏览器所在机器上
     // 建一条 `ssh -L 127.0.0.1:<port>:127.0.0.1:<port> <网关>` 转发，之后无需粘贴。
     if (r.manual_callback) {
-      $("lcCallbackHint").textContent =
-        "登录完成后若浏览器停在一条打不开的 127.0.0.1 地址上（上游只允许回调到 127.0.0.1，"
-        + "从别的机器打开面板时必然如此）：把那条完整 URL（含 ? 之后的全部参数）复制到下面提交，网关会立刻换取凭据。"
-        + "浏览器与网关同一台机器时无需理会此项；若已在浏览器所在机器建好端口转发，也会自动完成。";
-      $("lcCallbackRow").classList.remove("hidden");
+      // 同机时这行是**纯干扰**：浏览器就在网关这台机器上，授权完会直接跳回
+      // `http://localhost:<port>/oauth-callback`，回调自动完成，用户什么都不用做。
+      // 2026-10-30 现场：用户看到「粘贴完整 URL」的输入框，以为流程要求他手工填，
+      // 结果一直等/一直填，把真正的失败原因（换码被网络挡住）淹没了。
+      // 故按「面板是否从环回地址打开」判同机：同机 → 一句话说明「无需操作」，
+      // 跨机（局域网/远程面板）→ 才展示输入框与完整说明。
+      const sameMachine = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+      if (sameMachine) {
+        $("lcCallbackHint").textContent =
+          "浏览器与网关在同一台机器上：授权完成后会自动跳回本机回调，**无需填写任何东西**。"
+          + "（只有在浏览器停在一条打不开的地址、且面板是别的机器访问时才需要手工粘贴。）";
+        $("lcCallbackRow").classList.remove("hidden");
+        $("lcCallbackUrl").value = "";
+      } else {
+        $("lcCallbackHint").textContent =
+          "你把面板从另一台机器访问（" + location.host + "）：授权完成后浏览器会跳到它自己机器的 "
+          + "127.0.0.1/<端口>，那页打不开是正常的。把地址栏那条完整 URL（含 ? 之后全部参数）粘贴到下面提交。";
+        $("lcCallbackRow").classList.remove("hidden");
+      }
     } else {
       $("lcCallbackRow").classList.add("hidden");
       $("lcCallbackUrl").value = "";

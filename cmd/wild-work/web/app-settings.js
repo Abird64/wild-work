@@ -40,9 +40,18 @@ function syncListenRisk() {
   $("adminPassReq").classList.toggle("hidden", !needPass);
 }
 
-async function openSettings() {
-  // 弹层互斥：打开设置时收起「查找模型」（#134）
-  $("modelSearchOverlay").classList.add("hidden");
+// renderSettingsForm 「其他」页表单的唯一回填入口（**纯回填，不做导航**）。
+//
+// 2026-10-30 现场缺陷（用户实测「填完保存提示 端口无效：0」）：
+// 回填逻辑原先只写在 openSettings() 里，而 openSettings 只绑在顶栏 ⚙ 齿轮上；
+// 用户按 R129 的新导航点「其他」页签直达时**根本不走 openSettings** ⇒ `#inPort` 是空值
+// ⇒ saveSettings 里 `parseInt("")` = NaN ⇒ JSON 序列化成 null ⇒ 后端 SetListen 收到 0
+// ⇒ `端口无效：0`，且它排在保存流程第 1 步，把后面的备用通道配置一并阻断
+// （用户只是想配代理，却卡在一个他根本没改过的端口上）。
+// 现在既有「⚙ 进设置」也有「直接点其他页签」两条入口，回填必须两侧都覆盖，
+// 故抽成独立函数由 showMainTab("other") 调用 —— 那才是用户真正的落点。
+function renderSettingsForm() {
+  if (!state) return; // 首帧 state 未到：由 showMainTab 在 state 到位后再补
   // 监听
   $("inPort").value = state.listen_port;
   $("selHost").value = state.listen_host === "127.0.0.1" ? "127.0.0.1"
@@ -81,6 +90,17 @@ async function openSettings() {
   renderBackupProxy();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
+  // 自动签到 + 开机自启
+  $("chkAutostart").checked = !!state.autostart;
+  $("chkLoopGuard").checked = state.loop_guard !== false; // 缺省（旧后端）按开启显示
+  $("chkBodyLog").checked = !!state.body_log;
+  syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
+  // 编辑态副本等**非表单回显**的初始化也留在这里（renderSettingsForm 只管字段值）。
+  initSettingsEditors();
+}
+
+// initSettingsEditors 编辑态副本与异步补齐（与字段回填分开：showMainTab 不该触发网络请求）。
+function initSettingsEditors() {
   // 模型降级链
   if (!lastFees) loadFees();
   fbRules = JSON.parse(JSON.stringify(state.model_fallback || []));
@@ -92,13 +112,16 @@ async function openSettings() {
   $("effGlobalInput").value = effs["*"] || "";
   renderEffList();
   $("effModelInput").value = ""; $("effEffortInput").value = "";
-  // 自动签到 + 开机自启
-  $("chkAutostart").checked = !!state.autostart;
-  $("chkLoopGuard").checked = state.loop_guard !== false; // 缺省（旧后端）按开启显示
-  $("chkBodyLog").checked = !!state.body_log;
-  syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
+}
+
+async function openSettings() {
+  // 弹层互斥：打开设置时收起「查找模型」（#134）
+  $("modelSearchOverlay").classList.add("hidden");
+  renderSettingsForm();
   // R129：设置不再是弹层，而是「其他」Tab 的一页。原先那句「移除 settingsOverlay 的 hidden」
   // 改为切到该 tab —— 表单字段的 id 一个都没变，故上面的回显逻辑完全复用。
+  // ⚠️ 顺序：先回填再切 tab（showMainTab("other") 也会调 renderSettingsForm，
+  //    但那时 state 一定已到位，重复调用是幂等的）。
   showMainTab("other");
   // 三场景编辑区（SR-005b）：先渲染（立刻可见），再 await 取活值（推荐列表要用新数据，SD-7）。
   // 顺序是「先可见后补齐」而不是反过来——费率接口慢时不该让整页等它。

@@ -23,8 +23,18 @@ func TestCreditsUnitTokenChannels(t *testing.T) {
 		t.Error("ZCode 应走 Token 计数面板；标成 credits_na 会让用量完全看不见")
 	}
 
+	// 百分比配额渠道（2026-10-30）：Gemini 的额度是「窗口剩余百分比」而非可消耗积分，
+	// 必须标 "percent" 让面板改显示窗口；**不得**落进积分口径（那会显示成 0 分）。
+	if got := a.creditsUnit(provider.Gemini.String()); got != "percent" {
+		t.Errorf("Gemini creditsUnit = %q，期望 \"percent\"（额度是窗口百分比）", got)
+	}
+	if a.creditsNAKind(provider.Gemini.String()) {
+		t.Error("Gemini 应走百分比窗口面板；标成 credits_na 会把额度完全藏起来")
+	}
+
 	// 积分渠道抽样：都必须是空串（积分口径），且不能是 NA。
-	for _, k := range []provider.Kind{provider.Minimax, provider.LobsterAI, provider.CodeArts, provider.Gemini, provider.GLM, provider.Raccoon} {
+	// ⚠️ Gemini 已移出本组（它是 percent 口径，见上）。
+	for _, k := range []provider.Kind{provider.Minimax, provider.LobsterAI, provider.CodeArts, provider.GLM, provider.Raccoon} {
 		if got := a.creditsUnit(k.String()); got != "" {
 			t.Errorf("%s creditsUnit = %q，期望空串（积分）", k, got)
 		}

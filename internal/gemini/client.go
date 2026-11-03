@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
 )
@@ -143,6 +144,53 @@ func (c *Client) streamClient() *http.Client {
 	return c.StreamHTTP
 }
 
+// ---------------------------------------------------------------------------
+// 出站出口（直连 / 备用上游通道）
+// ---------------------------------------------------------------------------
+//
+// 为什么要给 gemini 接备用通道（2026-10-30 用户实测驱动，本项目原来**没有**这条路）：
+//
+//	gemini 的全部端点是 Google 系（accounts.google.com / oauth2.googleapis.com /
+//	cloudcode-pa.googleapis.com），国内直连**必然超时**（本机实测：三个端点 25s 全部
+//	timeout，Windows 侧 `Test-NetConnection` 对 accounts.google.com:443 亦为 False）。
+//	而本包此前**完全直连**（newTransport 没有 Proxy 字段、也没走 backuplink），
+//	后果是「即使凭据齐了、授权页也打开了，换码与推理仍必挂在超时上」——
+//	用户看到的只是 `dial tcp …: i/o timeout`，无从知道要配代理。
+//
+// 与 cline/oczen 的差别（不要把三处口径混成一处）：cline/oczen 的备用通道是
+// 「命中**地区拒绝**才重放一次」（backuplink.Replay，判据是 403 文案）；而 Gemini
+// 这里**没有地区拒绝这一说**，限制是网络层不可达 —— 一旦配了备用通道，
+// 该渠道的 Google 出站就应当**默认走它**，否则「配了代理仍然超时」。
+//
+// 实现取用 backuplink.Client(base)（与 cline/oczen 同一份出口构造：逐字段复刻
+// 本渠道 Transport 的旋钮 + 禁用 h2）：
+//   - 未配置备用通道 → 返回 nil → 原样用直连（零行为变化）；
+//   - 已配置 → 返回绑定该出口的 client。
+//
+// 热更新安全：backuplink.Set 是包级原子快照，Generation 变化即换指针；
+// 本文件**不缓存**取用结果（每次现取），故面板改代理立刻生效，
+// 不存在「要重建渠道 Transport」的接线表可漏（R57 的教训）。
+
+// router 选择本次请求的出站 client：已配备用通道则走它，否则直连。
+//
+// direct 传本渠道自己的 client（HTTP 或 StreamHTTP）；base 传它的 Transport。
+// 取不到 Transport（被测试注入成自定义 RoundTripper）时退回 backuplink.Client(nil)
+// 的保守底座 —— 宁可少复刻几个旋钮，也不要因为类型断言失败而静默退回直连。
+func router(direct *http.Client) *http.Client {
+	if !backuplink.Enabled() || direct == nil {
+		return direct
+	}
+	base, _ := direct.Transport.(*http.Transport)
+	return backuplink.Client(base)
+}
+
+// Outbound 是 router 的**导出入口**：给兄弟包（login_gemini）用同一份出口判据。
+//
+// 为什么要导出而不是让 login_gemini 自己判一遍：登录链与数据面**必须同源**
+// （R108「探针没走同一条链路」的同族教训）。各写一份必然出现「登录走代理、
+// 对话直连」这种半接线，且症状是「登录成功但一对话就 502」，排查成本极高。
+func Outbound(direct *http.Client) *http.Client { return router(direct) }
+
 // idleTimeout 生效的空闲超时。
 func (c *Client) idleTimeout() time.Duration {
 	if c.IdleTimeout <= 0 {
@@ -160,14 +208,20 @@ func (c *Client) idleTimeout() time.Duration {
 // ⚠️ 刻意**不设** `Accept`：流式请求抓包一致地不带它（geminiHeaders 的 includeAccept
 // 默认 false）。⚠️ 刻意**不设** `x-goog-api-key` / `x-goog-api-client`：原版不带，
 // 多一个头就多一个「非官方客户端」的识别特征。
+// identityHeaders 只设官方 Antigravity IDE 形态**真的会发**的头。
+//
+// 2026-10-30（R135）删掉四个编造的头：`x-client-name` / `x-client-version` /
+// `x-machine-id` / `x-vscode-sessionid`。依据是 opencodex 对官方 2.5.5 的反编译：
+// `SetHTTPHeaders` 的五个形态里，IDE / Standalone / Stubby 都是 **16 字节直接 ret**
+// （一个头都不加），只有 CLI / Hub 会加 `X-Goog-User-Project`。
+// 也就是说官方 IDE 客户端出站只靠 `Authorization` + `Content-Type` + `User-Agent`。
+//
+// 多发四个上游根本不发的头，等于主动留下「非官方客户端」指纹 —— 而这正是我们
+// 前几轮被 `UNSUPPORTED_CLIENT` / 403 折腾的同一类问题。少发比伪造安全。
 func identityHeaders(req *http.Request, token string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", IdentityUserAgent)
-	req.Header.Set("x-client-name", IdentityClientName)
-	req.Header.Set("x-client-version", IdentityClientVersion)
-	req.Header.Set("x-machine-id", IdentityMachineID)
-	req.Header.Set("x-vscode-sessionid", IdentitySessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,37 +261,134 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 
 	eps := c.endpoints()
+	// 降级重试状态：客户端可能回传一个**来自别处**的思考签名（换过模型 / 旧会话 /
+	// 中间层缓存），上游会以 `400 Request contains an invalid argument` 拒绝
+	// （注意与「missing」是两条不同文案，后者才是没带签名）。那种情况把签名统一
+	// 换成哨兵值再试一次即可 —— 只在**确实带了真签名**时才重试，否则白打一次上游。
+	sentinelRetried := false
+	// lastUpstream 上游给过的**最后一个明确答复**（状态码 + 原文）。
+	//
+	// 为什么需要（2026-11-03 由测试逼出来的真缺陷）：双端点时会出现
+	// 「daily 回 500、sandbox 传输层 EOF」，旧实现把 lastErr（EOF）当结论上报 ⇒
+	// 用户只看到 `502 … EOF`，而上游其实明确说过「500 boom」。
+	// 传输层错误是**我们这一侧**的故障，上游答复是**上游**的故障；后者信息量大得多，
+	// 必须优先暴露 —— 否则真正的上游原因被本地代理问题掩盖，排查方向直接跑偏。
+	var lastUpstreamStatus int
+	var lastUpstreamBody []byte
 	var lastErr error
-	for i, ep := range eps {
-		req, err := http.NewRequest(http.MethodPost, ep+EpStreamGenerate+StreamQuery, bytes.NewReader(out))
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		identityHeaders(req, token)
-		resp, err := c.streamClient().Do(req)
-		if err != nil {
-			lastErr = err
-			if i < len(eps)-1 {
-				continue // 传输层失败 → 换下一个端点（协议 §2.1 的轮换顺序）
+	// 传输层重试轮次（2026-11-03 用户实测驱动）：
+	//
+	// 现场错误全部指向**本地代理**而不是 Google —— 日志里是
+	//   `write tcp 127.0.0.1:xxxxx->127.0.0.1:7890: wsasend: An existing connection was forcibly closed`
+	//   与 `... : EOF`
+	// 也就是 FlClash（7890）主动掐了连接。实测排除了两个更"合理"的猜测：
+	//   ① 不是空闲连接复用——失败前的间隔有 4s/6s，而 242s 的间隔反而成功；
+	//   ② 不是「上游提前拒绝导致写 body 失败」——22KB body + 坏签名直连上游
+	//      两个端点都返回**干净的 400**（Corrupted thought signature），不是断连。
+	// 结论：这是传输层瞬时故障，重试一次（换新连接）就能吸收掉。
+	//
+	// 安全性：此处**尚未向客户端写出任何字节**（返回的是 reader，由 handler 之后才写），
+	// 所以整段重试对外不可见。上限 = 原轮 + 1 次重试，避免代理真挂了时反复打上游。
+	const transportRetries = 1
+	transportAttempt := 0
+	for {
+		transportErrCount := 0
+		for i := 0; i < len(eps); i++ {
+			ep := eps[i]
+			req, err := http.NewRequest(http.MethodPost, ep+EpStreamGenerate+StreamQuery, bytes.NewReader(out))
+			if err != nil {
+				return nil, 0, nil, err
 			}
-			return nil, 0, nil, err
-		}
-		if resp.StatusCode >= 400 {
-			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			_ = resp.Body.Close()
-			// 5xx 属上游故障：换下一个端点再试一次；其余状态原样透传给 Classify。
-			if resp.StatusCode >= 500 && i < len(eps)-1 {
-				lastErr = fmt.Errorf("gemini：端点 %s 返回 %d", ep, resp.StatusCode)
+			identityHeaders(req, token)
+			hc := router(c.streamClient())
+			resp, err := hc.Do(req)
+			if err != nil {
+				transportErrCount++
+				lastErr = err
+				log.Printf("gemini：端点 %s 传输层失败（第 %d 轮）：%v", ep, transportAttempt+1, err)
 				continue
 			}
-			return nil, resp.StatusCode, raw, nil
+			if resp.StatusCode >= 400 {
+				raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				lastUpstreamStatus, lastUpstreamBody = resp.StatusCode, raw
+				// 5xx 属上游故障：换下一个端点再试一次；其余状态原样透传给 Classify。
+				if resp.StatusCode >= 500 && i < len(eps)-1 {
+					lastErr = fmt.Errorf("gemini：端点 %s 返回 %d", ep, resp.StatusCode)
+					continue
+				}
+				// **无效签名**：换成哨兵值重试同一个端点一次（不换端点——签名与端点无关，
+				// 换端点只是把同一个错误再撞一遍）。
+				if !sentinelRetried && resp.StatusCode == http.StatusBadRequest &&
+					isInvalidArgument(raw) && hasRealSignature(out) {
+					sentinelRetried = true
+					alt, code2, berr := buildInternalBodyMode(body, project, true)
+					if berr == nil {
+						log.Printf("gemini：上游以 invalid_argument 拒绝（多为客户端回传的思考签名失效），"+
+							"改用哨兵签名重试同一端点（原响应：%s）", snippet(raw))
+						out = alt
+						i-- // 重来一次当前端点
+						continue
+					}
+					_ = code2
+				}
+				// **地区限制**（2026-10-30 现场）：`400 User location is not supported for the API use`
+				// 是**按端点**判定的 —— 实测同一账号、同一 token、同一个出口 IP（香港），
+				// 配额端点（sandbox）200 而推理端点（daily）回这句。故它不该是终态：
+				// 换下一个端点有真实成功机会，而直接透传只会让用户拿到一句无从下手的 400。
+				if isRegionBlocked(resp.StatusCode, raw) {
+					if i < len(eps)-1 {
+						lastErr = fmt.Errorf("gemini：端点 %s 不支持当前出口地区（HTTP %d）：%s",
+							ep, resp.StatusCode, snippet(raw))
+						continue
+					}
+					// 所有端点都判定「地区不支持」⇒ 这是**出口 IP 的问题**，不是账号、不是配置。
+					// 明确记一行，让用户能把「换了哪个节点」与「通不通」对上号：
+					// 2026-10-30 实测香港出口被 Google 封锁（配额端点不校验地区、推理端点校验，
+					// 于是表现成「登录成功、配额能查、一对话就 400」这种最费解的形态）。
+					log.Printf("gemini：当前出口地区不受支持（已试 %d 个端点）—— "+
+						"Google 的 Gemini/Code Assist 对中国大陆、香港等地不开放；"+
+						"请把代理节点切到日本/新加坡/美国/台湾等受支持地区后重试", len(eps))
+					return nil, resp.StatusCode, raw, nil
+				}
+				return nil, resp.StatusCode, raw, nil
+			}
+			return provider.NewIdleReader(resp.Body, c.idleTimeout()), resp.StatusCode, nil, nil
 		}
-		return provider.NewIdleReader(resp.Body, c.idleTimeout()), resp.StatusCode, nil, nil
+		// 所有端点都传输层失败：还有重试预算就整轮重来一次（换新连接）。
+		//
+		// 只在「全部端点都是传输层失败」时重试——若某个端点回了正常响应，上面已经 return，
+		// 不会走到这里，所以不会把「上游明确拒绝」也当成网络故障去重试。
+		if transportErrCount == len(eps) && transportAttempt < transportRetries {
+			transportAttempt++
+			log.Printf("gemini：%d 个端点全部传输层失败（多为本地代理断连），重试一次", len(eps))
+			continue
+		}
+		// 上游给过明确答复就优先上报它（比本地代理的 EOF 有信息量得多）。
+		if lastUpstreamStatus != 0 {
+			return nil, lastUpstreamStatus, lastUpstreamBody, nil
+		}
+		if lastErr != nil {
+			return nil, 0, nil, lastErr
+		}
+		return nil, 0, nil, errors.New("gemini：没有可用端点")
 	}
-	if lastErr == nil {
-		lastErr = errors.New("gemini：没有可用端点")
+}
+
+// isRegionBlocked 「当前出口地区不受支持」判据（2026-10-30 现场原文）：
+//
+//	400 {"error":{"code":400,"message":"User location is not supported for the API use.",
+//	     "status":"FAILED_PRECONDITION"}}
+//
+// 只认这两句实证文案，不外扩：`FAILED_PRECONDITION` 单独出现还可能表示别的语义，
+// 拿它当判据会误伤。
+func isRegionBlocked(status int, raw []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
 	}
-	return nil, 0, nil, lastErr
+	lower := strings.ToLower(string(raw))
+	return strings.Contains(lower, "user location is not supported") ||
+		strings.Contains(lower, "location is not supported")
 }
 
 // Stream 把上游流（v1internal SSE）转成 OpenAI SSE 后交给统一规范化层。
@@ -434,6 +585,22 @@ func Classify(status int, body string) provider.ErrKind {
 	case status == http.StatusUnauthorized:
 		return provider.ErrSessionDead
 	case status == http.StatusForbidden, status == http.StatusNotFound:
+		// 403 里有两种截然不同的东西，必须分开（2026-10-30 现场）：
+		//
+		//  ① **账号准入**（VALIDATION_REQUIRED / "Verify your account" /
+		//     "The caller does not have permission"）—— 上游认为这个账号不够格用
+		//     Code Assist，要求先去完成 Google 账号验证。这是**账号级**问题：
+		//     换号可能有效（换个已通过验证的账号即可），故归 ErrAccountFault（冷却轮换）。
+		//     原先一律归 ErrServer，语义变成「上游 5xx 故障」⇒ 既不换号也不提示，
+		//     用户只看到「配额查询失败」和一个 0。
+		//
+		//  ② WAF / 网关拦截页 —— 真正的基础设施层拒绝，维持原判。
+		if isAdmissionBlocked(lower) {
+			return provider.ErrAccountFault
+		}
+		if isWafBlocked(lower) {
+			return provider.ErrWafBlock
+		}
 		return provider.ErrServer
 	case status >= 500:
 		return provider.ErrServer
@@ -445,6 +612,37 @@ func Classify(status int, body string) provider.ErrKind {
 	default:
 		return provider.ErrNone
 	}
+}
+
+// isAdmissionBlocked 「账号准入」类 403 的判据（2026-10-30 现场，逐字来自真实响应）。
+//
+// 三种文案是同一件事的不同层：`VALIDATION_REQUIRED` 出现在 loadCodeAssist 的
+// ineligibleTiers 里，另两句出现在随后的配额/推理 403 响应体里。
+func isAdmissionBlocked(lower string) bool {
+	for _, m := range []string{
+		// 账号需先验证
+		"validation_required",
+		"verify your account",
+		// 无 Code Assist 订阅/授权（403 #3501 "You do not have a valid license of this product"）
+		"subscription_required",
+		"valid license of this product",
+		"#3501",
+		// 客户端形态已被弃用（要求迁移 Antigravity）
+		"unsupported_client",
+		// 兜底：Antigravity 指纹下上游只回这一句，不带任何 reasonCode
+		"the caller does not have permission",
+	} {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWafBlocked 网关/WAF 拦截页判据：只认 HTML
+// 兜底页。空体**不**算（空 403 维持原判 ErrServer，不擅自扩语义）。
+func isWafBlocked(lower string) bool {
+	return strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype")
 }
 
 // isContextOverflow 上下文超限判据（协议 §2.5）。
@@ -479,7 +677,7 @@ func (c *Client) postJSON(endpoint, token string, body []byte) (int, []byte, err
 		return 0, nil, err
 	}
 	identityHeaders(req, token)
-	resp, err := c.HTTP.Do(req)
+	resp, err := router(c.HTTP).Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -501,7 +699,8 @@ func (c *Client) postForm(endpoint string, form url.Values) (int, []byte, error)
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.HTTP.Do(req)
+	// 令牌端点是 Google 系：国内直连必超时，故与推理/配额同源走 router（见其注释）。
+	resp, err := router(c.HTTP).Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

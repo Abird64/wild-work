@@ -228,14 +228,12 @@ func TestChatStreamIdentityHeaders(t *testing.T) {
 	if gotPath != EpStreamGenerate+StreamQuery {
 		t.Errorf("出站路径 = %q，期望 %q", gotPath, EpStreamGenerate+StreamQuery)
 	}
+	// 2026-10-30（R135）：官方 IDE 形态只发这三个头（反编译证据见 identityHeaders 注释），
+	// 四个编造的 x-client-* / x-machine-id / x-vscode-sessionid 已删除。
 	want := map[string]string{
-		"Authorization":      "Bearer ya29.FAKE_access_for_test",
-		"Content-Type":       "application/json",
-		"User-Agent":         "antigravity/4.3.0 (cmdc-pak)",
-		"X-Client-Name":      "antigravity",
-		"X-Client-Version":   "4.3.0",
-		"X-Machine-Id":       "cmdc-pak",
-		"X-Vscode-Sessionid": "proxy",
+		"Authorization": "Bearer ya29.FAKE_access_for_test",
+		"Content-Type":  "application/json",
+		"User-Agent":    "antigravity/4.3.0 (cmdc-pak)",
 	}
 	for k, v := range want {
 		if gotHdr.Get(k) != v {
@@ -479,7 +477,7 @@ func TestQuotaPercentParsing(t *testing.T) {
 		t.Errorf("字段名必须是 project：%s", gotBody)
 	}
 	// 身份头与推理**完全一致**。
-	if gotHdr.Get("User-Agent") != IdentityUserAgent || gotHdr.Get("X-Machine-Id") != IdentityMachineID {
+	if gotHdr.Get("User-Agent") != IdentityUserAgent {
 		t.Errorf("配额请求缺身份头：%v", gotHdr)
 	}
 	if quotaCalls != 1 {
@@ -635,7 +633,15 @@ func TestClassify(t *testing.T) {
 	}{
 		{"429 优先于 quota 文案", 429, `{"error":{"message":"quota exceeded"}}`, provider.ErrSoftRate},
 		{"401 会话失效", 401, `{"error":{"message":"unauthenticated"}}`, provider.ErrSessionDead},
-		{"403 归 SERVER", 403, `{"error":{"status":"PERMISSION_DENIED","details":[{"reason":"SUBSCRIPTION_REQUIRED"}]}}`, provider.ErrServer},
+		// 2026-10-30 语义修订：403 里的**准入类**文案（SUBSCRIPTION_REQUIRED /
+		// VALIDATION_REQUIRED / valid license / caller does not have permission）
+		// 是账号级授权问题 ⇒ account_fault（可换号）。旧断言把它固定成 server
+		// （「上游故障」），于是既不换号也不提示，用户只看到裸 403。
+		{"403 准入：无订阅", 403, `{"error":{"status":"PERMISSION_DENIED","details":[{"reason":"SUBSCRIPTION_REQUIRED"}]}}`, provider.ErrAccountFault},
+		{"403 准入：需验证", 403, `{"error":{"code":403,"message":"Verify your account to continue."}}`, provider.ErrAccountFault},
+		{"403 准入：Antigravity 裸文案", 403, `{"error":{"code":403,"message":"The caller does not have permission"}}`, provider.ErrAccountFault},
+		// 反向护栏：403 里**没有**准入特征时仍是「上游故障」，不外扩。
+		{"403 无准入特征仍归 SERVER", 403, `{"error":{"code":403,"status":"PERMISSION_DENIED"}}`, provider.ErrServer},
 		{"404 归 SERVER", 404, `{"error":{"code":404,"status":"NOT_FOUND"}}`, provider.ErrServer},
 		{"上下文超限", 400, `{"error":{"message":"The input token count exceeds the maximum number of tokens allowed 1048576"}}`, provider.ErrPromptTooLong},
 		{"配额耗尽", 400, `{"error":{"message":"resource_exhausted: quota exceeded"}}`, provider.ErrHardCredit},

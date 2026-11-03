@@ -94,6 +94,32 @@ func Set(raw string) error {
 // Enabled 报告是否已配置可用的备用通道。
 func Enabled() bool { return cur.Load() != nil }
 
+// Raw 返回当前生效的备用通道地址原文（未配置时为空串）。
+//
+// 用途：**错误文案要能点名「当前出口到底是什么」**。2026-10-30 现场：用户按提示
+// 配了代理，但填的端口根本没在监听（1080），而机器上可用的是 7890；原文案只说
+// 「网络不可达」，用户看着面板上「● 已生效」的绿点毫无线索，只能反复重试。
+// 这里的 `Enabled()` 只回答「配没配」，回答不了「配的是哪个」。
+// 只回地址、不回任何凭据（代理 URL 的 userinfo 已在 Parse 阶段被接受，
+// 故此处**剔除** userinfo 段，避免把 `socks5://user:pass@host` 的密码写进用户可见文案）。
+func Raw() string {
+	l := cur.Load()
+	if l == nil {
+		return ""
+	}
+	return stripUserinfo(l.raw)
+}
+
+// stripUserinfo 去掉 URL 里的 `user:pass@` 段（没有则原样返回）。
+func stripUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = nil
+	return u.String()
+}
+
 // Generation 配置代号：每次 Set 成功（含关闭）自增。
 // 渠道据此作废本地「该模型只能走备用通道」的学习结果 —— 配置一变就得重新试探直连。
 func Generation() uint64 { return gen.Load() }

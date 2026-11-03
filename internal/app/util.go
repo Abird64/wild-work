@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"wild-work/internal/provider"
 )
@@ -160,10 +161,43 @@ func shortUID(uid string) string {
 	return uid[:10] + "…"
 }
 
+// shortErr 截短错误文案供面板显示。
+//
+// 两个刻意的取舍（2026-10-30 现场）：
+//  1. **按 rune 截断**，不按字节：旧实现 `s[:120]` 会把中文字符切成半个，
+//     面板上出现 “ 这类乱码（用户只会更困惑）。
+//  2. 上限放到 300：旧值 120 会把「账号需验证 + 验证链接」这类**唯一可行动的线索**
+//     整段切掉，用户看到的是「配额查询失败（HTTP 403）：{ "error": { "code": 403, ...」，
+//     恰好丢掉后面那句「去验证账号」。
 func shortErr(err error) string {
 	s := strings.TrimSpace(err.Error())
-	if len(s) > 120 {
-		return s[:120]
+	// 含 URL 的文案放宽上限：上游给的验证链接实测 400~500 字符，
+	// 300 的上限会把「唯一能行动的东西」切掉（见下方 URL 保护）。
+	max := 300
+	if strings.Contains(s, "https://") {
+		max = 900
 	}
-	return s
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	cut := max
+	// **URL 不得被截断**（2026-10-30）：上游给的验证链接约 400+ 字符，按固定字数切
+	// 会让用户拿到一条打不开的半截地址 —— 而那条链接恰恰是他唯一能行动的东西。
+	// 故若截断点落在 URL 内部，把切点推迟到该 URL 结束（宁可整体超一点，也不给坏链接）。
+	if i := strings.Index(s, "https://"); i >= 0 {
+		head := utf8.RuneCountInString(s[:i])
+		rest := s[i:]
+		end := strings.IndexAny(rest, " \n\t")
+		if end < 0 {
+			end = len(rest)
+		}
+		if urlEnd := head + utf8.RuneCountInString(rest[:end]); cut < urlEnd {
+			cut = urlEnd
+		}
+	}
+	if cut >= len(r) {
+		return s
+	}
+	return string(r[:cut]) + "…"
 }

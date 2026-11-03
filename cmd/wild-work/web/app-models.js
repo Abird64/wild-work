@@ -328,10 +328,20 @@ async function testOczenKey() {
 }
 
 async function saveSettings() {
+  // 0) 前置：表单未被回填时先补一次（防御上面那条缺陷复发）。
+  //     判据只看「端口框是不是空的」——它是最容易被漏填、且一旦为空就会把整份保存
+  //     连带阻断的字段（后端 SetListen 排在第 1 步，失败即 return）。
+  if (!$("inPort").value) renderSettingsForm();
   // 1) 监听地址 + 管理密码（同请求提交：后端先存密码再切监听）
   let host = $("selHost").value;
   if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
   const port = parseInt($("inPort").value, 10);
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+    // 绝不能把 NaN 送进 JSON：`JSON.stringify({port: NaN})` 会变成 `{"port":null}`，
+    // 后端 Unmarshal 得 0，报「端口无效：0」——用户完全看不出是自己没填（旧缺陷正是如此）。
+    toast("监听端口无效：请填写 1~65535 的端口号（当前监听端口在「其他」页顶部）");
+    return;
+  }
   const adminPass = $("adminPassInput").value.trim();
   const listenBody = { host, port };
   if (adminPass) listenBody.admin_password = adminPass; // 空 = 不改动，避免覆盖已设密码

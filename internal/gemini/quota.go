@@ -31,6 +31,7 @@ package gemini
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -54,6 +55,30 @@ type codeAssistInfo struct {
 	// CurrentTierID / CurrentTierName 仅作 paidTier 缺席时的兜底。
 	CurrentTierID   string
 	CurrentTierName string
+
+	// ---- 准入判定（2026-10-30 现场：Pro 账号仍被 403 拦住）----
+	//
+	// `ineligibleTiers[]` 是上游明说「这个账号**不够格**用哪些档位」的地方。实测样例
+	// （Google AI Pro 账号，loadCodeAssist 200）：
+	//
+	//	"ineligibleTiers": [{
+	//	  "reasonCode": "VALIDATION_REQUIRED",
+	//	  "reasonMessage": "Your current account is not eligible for Antigravity. Verify your account to continue.",
+	//	  "tierId": "free-tier", "tierName": "Antigravity",
+	//	  "validationErrorMessage": "Verify your account to continue.",
+	//	  "validationUrlLinkText": "Verify your account",
+	//	  "validationUrl": "https://accounts.google.com/v3/signin/continue?...",
+	//	  "validationLearnMoreUrl": "https://support.google.com/accounts?p=al_alert"
+	//	}]
+	//
+	// 这条信息**只有 loadCodeAssist 会给**：随后所有真实调用（配额 / 推理）都只回一句
+	// 干巴巴的 `403 The caller does not have permission`，用户完全看不出要去「验证账号」。
+	// 所以必须在这里抓住它，否则面板只能显示「查询失败」。
+	ValidationRequired bool
+	ValidationURL      string // 上游给的验证入口（逐字使用，不自己拼）
+	ValidationText     string // 链接文案（如「Verify your account」）
+	IneligibleReason   string // reasonCode，如 VALIDATION_REQUIRED
+	IneligibleMessage  string // reasonMessage 原文
 }
 
 // loadCodeAssist 探测账号档位与项目（`POST {sandbox}/v1internal:loadCodeAssist`）。
@@ -101,6 +126,15 @@ func parseCodeAssist(raw []byte) (codeAssistInfo, error) {
 			Name               string `json:"name"`
 			CloudAICodeProject string `json:"cloudaicompanionProject"`
 		} `json:"currentTier"`
+		IneligibleTiers []struct {
+			ReasonCode             string `json:"reasonCode"`
+			ReasonMessage          string `json:"reasonMessage"`
+			TierID                 string `json:"tierId"`
+			TierName               string `json:"tierName"`
+			ValidationURL          string `json:"validationUrl"`
+			ValidationURLLinkText  string `json:"validationUrlLinkText"`
+			ValidationErrorMessage string `json:"validationErrorMessage"`
+		} `json:"ineligibleTiers"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return codeAssistInfo{}, fmt.Errorf("gemini：loadCodeAssist 响应不是 JSON（%v）", err)
@@ -118,6 +152,22 @@ func parseCodeAssist(raw []byte) (codeAssistInfo, error) {
 	if payload.PaidTier != nil {
 		info.PaidTierID = strings.TrimSpace(payload.PaidTier.ID)
 		info.PaidTierName = strings.TrimSpace(payload.PaidTier.Name)
+	}
+	// 准入判定：取**第一条带 reasonCode 的**不符合格条目。上游按档位列出多条时，
+	// 它们对用户而言是同一件事（这个账号要先验证），取首条足以表达。
+	for _, it := range payload.IneligibleTiers {
+		if strings.TrimSpace(it.ReasonCode) == "" {
+			continue
+		}
+		info.IneligibleReason = strings.TrimSpace(it.ReasonCode)
+		info.IneligibleMessage = strings.TrimSpace(it.ReasonMessage)
+		info.ValidationURL = strings.TrimSpace(it.ValidationURL)
+		info.ValidationText = strings.TrimSpace(it.ValidationURLLinkText)
+		// 任一 reasonCode 都算「上游明说的准入判定」。原先只认 VALIDATION_REQUIRED，
+		// 于是 SUBSCRIPTION_REQUIRED / UNSUPPORTED_CLIENT 这两类同样明确的结论被丢掉，
+		// 用户只能看到 403 裸文案（2026-10-30 实测这三种都出现了，见下）。
+		info.ValidationRequired = true
+		break
 	}
 	if info.Project == "" && info.PaidTierID == "" && info.CurrentTierID == "" {
 		// 三个阶段都读不出东西：按探测失败处理（照原版：失败就不发推理）。
@@ -196,6 +246,96 @@ func (c *Client) quotaSummary(a *auth.Auth, project string) ([]provider.Resource
 	}
 	c.cacheQuota(key, items)
 	return items, nil
+}
+
+// withAdmission 把「账号准入」结论附加到配额/推理错误上。
+//
+// 为什么单独抽出来：配额 403 与推理 403 是**同一件事**的两种表现（账号不够格），
+// 而只有 loadCodeAssist 会给出可行动的那句话（验证链接）。两个调用点都要附，
+// 各写一份必然漂移。
+//
+// 不改 Kind / Status（那是给冷却状态机用的判据），只改用户可见文案。
+func withAdmission(err error, info codeAssistInfo) error {
+	if err == nil {
+		return err
+	}
+	// 403 但上游**没给任何 reasonCode** 的形态（Antigravity 指纹下实测就是这样：
+	// loadCodeAssist 的 ineligibleTiers 已消失，配额却回一句裸的
+	// `403 The caller does not have permission`）。此时不能编造原因，但也不能
+	// 只丢一句 403 —— 如实列出已知可能，并给出唯一能自证的验证方法。
+	if !info.ValidationRequired && isAdmissionBlocked(strings.ToLower(err.Error())) {
+		var pe *provider.Error
+		if errors.As(err, &pe) {
+			cp := *pe
+			cp.Msg = unknownAdmissionHint() + "；原始错误：" + pe.Msg
+			return &cp
+		}
+		return errors.New(unknownAdmissionHint() + "；原始错误：" + err.Error())
+	}
+	if !info.ValidationRequired {
+		return err
+	}
+	// 提示放在**最前面**：面板/日志都会截断长文案，而「需要验证账号 + 链接」
+	// 是用户唯一能行动的那句话，绝不能被上游那串 JSON 原文挤到末尾去。
+	var pe *provider.Error
+	if errors.As(err, &pe) {
+		cp := *pe
+		cp.Msg = strings.TrimPrefix(admissionHint(info), "；") + "；原始错误：" + pe.Msg
+		return &cp
+	}
+	return errors.New(strings.TrimPrefix(admissionHint(info), "；") + "；原始错误：" + err.Error())
+}
+
+// unknownAdmissionHint 403 且上游未给 reasonCode 时的提示。
+//
+// 只列**已实测见过的**三种可能，并给出唯一能定性的动作（用官方 CLI 登录同账号），
+// 不猜具体是哪一个。
+func unknownAdmissionHint() string {
+	return "⚠️ 上游拒绝了该账号的 Code Assist 访问，但**没有给出原因码**（403 The caller does not have permission）。" +
+		"已实测的三种成因：① 该账号无 Code Assist 订阅/授权（同形态在另一份响应里是 403 #3501「valid license」）；" +
+		"② 账号需先完成 Google 账号验证；③ 账号的 project 绑定异常（上游已知问题）。" +
+		"定性办法：在该机用官方 `gemini` CLI 登录同一账号跑一句对话 —— CLI 也失败则属账号侧，" +
+		"换一个个人 Google 账号最快"
+}
+
+// admissionHint 用上游**原样**给出的链接与文案拼一句可行动提示。
+// 绝不自己拼 Google 的验证 URL（那串带 sarp/scc/continue 参数，自己拼必错）。
+func admissionHint(info codeAssistInfo) string {
+	if !info.ValidationRequired {
+		return ""
+	}
+	// 按 reasonCode 分流成**可行动**的结论。三种都是 2026-10-30 在本机同一个账号上
+	// 实测拿到的原文（换不同客户端指纹/不同端点会得到不同的一种）：
+	//
+	//	VALIDATION_REQUIRED  → 账号需先完成 Google 账号验证（上游带验证链接，照抄给它）
+	//	SUBSCRIPTION_REQUIRED→ 该账号没有 Code Assist 的有效订阅（403 #3501
+	//	                       "You do not have a valid license of this product"）
+	//	UNSUPPORTED_CLIENT   → 该客户端已被弃用（gemini-cli 指纹现在会得到这句，
+	//	                       要求迁移到 Antigravity）
+	var hint string
+	switch strings.ToUpper(info.IneligibleReason) {
+	case "VALIDATION_REQUIRED":
+		hint = "；⚠️ 上游判定该账号**需要先完成 Google 账号验证**才会放行（code=" + info.IneligibleReason + "）"
+	case "SUBSCRIPTION_REQUIRED":
+		hint = "；⚠️ 上游判定该账号**没有 Code Assist 的有效订阅/授权**（code=" + info.IneligibleReason +
+			"，403 #3501「You do not have a valid license of this product」）——不是工具问题，也不是积分不足；" +
+			"换一个已开通 Code Assist 的账号，或为该账号所在的 GCP project 开通订阅"
+	case "UNSUPPORTED_CLIENT":
+		hint = "；⚠️ 上游**已弃用该客户端形态**（code=" + info.IneligibleReason + "），" +
+			"要求迁移到 Antigravity 客户端"
+	default:
+		hint = "；⚠️ 上游拒绝了该账号的准入（code=" + info.IneligibleReason + "）"
+	}
+	if info.ValidationURL != "" {
+		label := info.ValidationText
+		if label == "" {
+			label = "处理入口"
+		}
+		hint += "：" + label + " → " + info.ValidationURL
+	} else if info.IneligibleMessage != "" {
+		hint += "：" + info.IneligibleMessage
+	}
+	return hint
 }
 
 // parseQuotaItems 解析配额响应 → ResourceItem 列表（顺序：5 小时窗口 → 周窗口）。
@@ -384,7 +524,11 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		c.persistProject(a, tr.info)
 	}
 	if qerr != nil {
-		return 0, nil, qerr
+		// 把 loadCodeAssist 里的准入判定拼进来（2026-10-30 现场）。
+		// 真实调用的 403 只回一句 `The caller does not have permission`，
+		// 而「账号需要先验证」这个唯一可行动的结论只在 loadCodeAssist 的
+		// ineligibleTiers 里出现过 —— 不在这里合并，面板/日志就永远看不到它。
+		return 0, nil, withAdmission(qerr, tr.info)
 	}
 	return 0, items, nil
 }
