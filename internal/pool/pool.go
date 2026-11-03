@@ -579,6 +579,7 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 		if e.errCount >= threshold {
 			e.until = time.Now().Add(d)
 			e.reason = "consecutive errors"
+			e.coolKind = CoolErr
 			e.errCount = 0
 		}
 	}

@@ -80,6 +80,16 @@ func TestPickExcluding(t *testing.T) {
 	}
 }
 
+func TestNoteErrorSetsCoolKind(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteError("u1", 1, time.Hour)
+	st, _ := p.Status("u1")
+	if st.CoolKind != "error_threshold" {
+		t.Fatalf("st.CoolKind = %q, want error_threshold", st.CoolKind)
+	}
+}
+
 func TestCooldownPersists(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
