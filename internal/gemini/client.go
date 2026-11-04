@@ -312,6 +312,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 				raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 				_ = resp.Body.Close()
 				lastUpstreamStatus, lastUpstreamBody = resp.StatusCode, raw
+				// 400 现场取证：始终记一行结构摘要（无内容），并可按诊断开关全量落盘。
+				if resp.StatusCode == http.StatusBadRequest {
+					log.Printf("gemini 400 现场：%s", summarizeRequest(out))
+					dumpFailed(out, raw, resp.StatusCode)
+				}
 				// 5xx 属上游故障：换下一个端点再试一次；其余状态原样透传给 Classify。
 				if resp.StatusCode >= 500 && i < len(eps)-1 {
 					lastErr = fmt.Errorf("gemini：端点 %s 返回 %d", ep, resp.StatusCode)

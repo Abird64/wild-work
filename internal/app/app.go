@@ -14,6 +14,7 @@ import (
 	// 别名 statsEngine：/api/usage handler 内有同名局部变量 stats（遮蔽包名）
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
+	"wild-work/internal/gemini"
 	"wild-work/internal/ledger"
 	loginglm "wild-work/internal/login_glm"
 	"wild-work/internal/officeace"
@@ -154,6 +155,29 @@ type App struct {
 }
 
 // New 构建 App 并接管全局日志（写文件 + 环形缓冲）。
+// wireGeminiDiag 装配 gemini 的 400 现场取证落盘。
+//
+// 与「请求体摘要记录」（config.body_log）**同一开关、同一 data/ 目录**：
+// 用户显式开过诊断才写全量请求体；否则只写结构摘要（不含任何消息内容）到日志。
+// 这样既尊重既有隐私口径（body_log 是唯一的内容级诊断开关），
+// 又能在出问题时一次性拿到可比对的现场。
+func wireGeminiDiag(enabled func() bool, dir string) {
+	if gemini.DumpFailedBody != nil {
+		return
+	}
+	gemini.DumpFailedBody = func(body, upstreamRaw []byte, status int) {
+		if !enabled() {
+			return
+		}
+		p, err := gemini.SaveFailedBody(dir, body, upstreamRaw, status)
+		if err != nil {
+			log.Printf("gemini 400 请求体落盘失败：%v", err)
+			return
+		}
+		log.Printf("gemini 400 请求体已落盘：%s", p)
+	}
+}
+
 func New(opts Options) (*App, error) {
 	a := &App{
 		cfgPath:  opts.ConfigPath,
@@ -178,6 +202,10 @@ func New(opts Options) (*App, error) {
 		go a.ledger.AutoFlush(a.ledgerStop)
 		// 请求体摘要开关（诊断用，默认关）：进程级全局，启动时与 config.body_log 同步
 		ledger.SetBodyTrace(a.cfg.BodyLog)
+		// gemini 的 400 现场取证：同一开关控制「是否落盘全量请求体」，
+		// 目录与请求体摘要同源（data/ 下），默认关时不写任何内容。
+		wireGeminiDiag(func() bool { return ledger.BodyTraceEnabled() },
+			filepath.Join(filepath.Dir(opts.Config.StateFile), "gemini-400"))
 	}
 
 	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
