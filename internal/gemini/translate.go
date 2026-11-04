@@ -249,6 +249,20 @@ var geminiSchemaKeys = map[string]bool{
 //  3. `type` 为数组形态（如 `["string","null"]`）时收敛成单个 type 并补 `nullable: true`；
 //     `enum` 只要含**任何非字符串**值就整删（Gemini 只接受字符串枚举）。
 func sanitizeSchema(in map[string]any) map[string]any {
+	return sanitizeSchemaDepth(in, 0)
+}
+
+// schemaMaxDepth 递归深度上限。
+//
+// 上游实测原文：`Message recursion depth exceeds maximum of 64`（40 层嵌套 schema 即触发，
+// 说明每层消耗不止 1 个配额）。取 30 留足余量：超过此深度的子 schema 直接退成 `{}`
+// （空 schema 上游接受，实测 200），而不是让**整轮请求**因一个畸形工具而 400。
+const schemaMaxDepth = 30
+
+func sanitizeSchemaDepth(in map[string]any, depth int) map[string]any {
+	if depth > schemaMaxDepth {
+		return map[string]any{}
+	}
 	out := map[string]any{}
 	for key, value := range in {
 		if !geminiSchemaKeys[key] {
@@ -266,7 +280,7 @@ func sanitizeSchema(in map[string]any) map[string]any {
 				if !ok {
 					continue
 				}
-				props[name] = sanitizeSchema(cm)
+				props[name] = sanitizeSchemaDepth(cm, depth+1)
 			}
 			out[key] = props
 		case "items":
@@ -275,12 +289,12 @@ func sanitizeSchema(in map[string]any) map[string]any {
 				arr := make([]any, 0, len(t))
 				for _, it := range t {
 					if m, ok := it.(map[string]any); ok {
-						arr = append(arr, sanitizeSchema(m))
+						arr = append(arr, sanitizeSchemaDepth(m, depth+1))
 					}
 				}
 				out[key] = arr
 			case map[string]any:
-				out[key] = sanitizeSchema(t)
+				out[key] = sanitizeSchemaDepth(t, depth+1)
 			}
 		case "anyOf":
 			arr, ok := value.([]any)
@@ -290,7 +304,7 @@ func sanitizeSchema(in map[string]any) map[string]any {
 			items := make([]any, 0, len(arr))
 			for _, it := range arr {
 				if m, ok := it.(map[string]any); ok {
-					items = append(items, sanitizeSchema(m))
+					items = append(items, sanitizeSchemaDepth(m, depth+1))
 				}
 			}
 			out[key] = items
@@ -336,6 +350,45 @@ func sanitizeSchema(in map[string]any) map[string]any {
 			}
 		default:
 			out[key] = value
+		}
+	}
+	// 三处一致性归一（2026-11-04）：这些形态上游会以**语义错误**拒绝，
+	// 且清一色是「我们自己的清洗动作制造出来的」，必须在出口前补平。
+	//
+	//  1. `required` 指向 properties 里不存在的键 —— 上文会把「非对象的属性值」丢掉，
+	//     若 required 仍列着它，上游回 `property is not defined`（实测原文）。
+	//  2. 有 `properties` 却没 `type` —— 上游回 `properties: only allowed for OBJECT`
+	//     （实测原文）。客户端漏写 type 是常态，补成 object 是其本意。
+	//  3. `type: "array"` 却没有 `items` —— 上游回 `items: missing field`（实测原文）。
+	//     补空 items（上游接受 `items:{}`，实测 200）。
+	if req, ok := out["required"].([]any); ok {
+		props, _ := out["properties"].(map[string]any)
+		kept := make([]any, 0, len(req))
+		for _, it := range req {
+			name, _ := it.(string)
+			if name == "" {
+				continue
+			}
+			if _, exists := props[name]; exists {
+				kept = append(kept, it)
+			}
+		}
+		// 全被剔掉就整个键不要（空 required 上游虽接受，但无意义且徒增字节）
+		if len(kept) > 0 {
+			out["required"] = kept
+		} else {
+			delete(out, "required")
+		}
+	}
+	if props, ok := out["properties"]; ok {
+		if _, hasType := out["type"]; !hasType {
+			out["type"] = "object"
+			_ = props
+		}
+	}
+	if t, _ := out["type"].(string); t == "array" {
+		if _, hasItems := out["items"]; !hasItems {
+			out["items"] = map[string]any{}
 		}
 	}
 	return out

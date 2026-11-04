@@ -48,7 +48,8 @@ type requestShape struct {
 		} `json:"systemInstruction"`
 		Tools []struct {
 			FunctionDeclarations []struct {
-				Name string `json:"name"`
+				Name       string          `json:"name"`
+				Parameters json.RawMessage `json:"parameters"`
 			} `json:"functionDeclarations"`
 		} `json:"tools"`
 		GenerationConfig struct {
@@ -145,14 +146,18 @@ func summarizeRequest(body []byte) string {
 			strings.Join(roles[:8], ","), strings.Join(roles[len(roles)-8:], ","))
 	}
 
+	sa := auditSchemas(r.Tools)
+
 	return fmt.Sprintf(
 		"bytes=%d model=%s contents=%d roles=%s parts=%d[text=%d call=%d resp=%d img=%d] "+
 			"emptyContents=%d bothTextAndCall=%d nonObjectArgs=%d "+
-			"sig[real=%d sentinel=%d bad=%d] tools=%d longNames=%d sysBytes=%d maxOut=%d budget=%s",
+			"sig[real=%d sentinel=%d bad=%d] tools=%d longNames=%d sysBytes=%d maxOut=%d budget=%s "+
+			"schema[reqMiss=%d noType=%d arrNoItems=%d enumNonStr=%d unknownKey=%d maxDepth=%d first=%s]",
 		len(body), sh.Model, len(r.Contents), roleSeq, parts, nText, nCall, nResp, nImage,
 		nEmptyContent, bothTextAndCall, nonObjectArgs,
 		realSig, sentinelSig, badSig, toolCount, longNames, sysBytes,
-		r.GenerationConfig.MaxOutputTokens, budget)
+		r.GenerationConfig.MaxOutputTokens, budget,
+		sa.reqMissing, sa.noType, sa.arrNoItems, sa.enumNonStr, sa.unknownKey, sa.maxDepth, sa.firstBad)
 }
 
 // shortRole 把角色缩成一个字符，让序列可读。
@@ -217,4 +222,109 @@ func SaveFailedBody(dir string, body, upstreamRaw []byte, status int) (string, e
 		names = names[1:]
 	}
 	return reqPath, nil
+}
+
+// schemaAudit 工具 schema 的结构异常计数（**不含任何 schema 内容**，只报计数与首个违规位置）。
+type schemaAudit struct {
+	reqMissing int // required 指向不存在的 property
+	noType     int // 有 properties 但缺 type
+	arrNoItems int // type=array 但缺 items
+	enumNonStr int // enum 含非字符串
+	unknownKey int // 清洗后仍残留白名单外的键（应恒为 0；非 0 说明清洗有漏洞）
+	maxDepth   int // 实测最大嵌套深度
+	firstBad   string
+}
+
+// auditSchemas 审计全部工具声明的 parameters。
+//
+// 为什么放进 400 摘要：上游对 schema 语义错误**会给明确文案**，但历史上也出现过
+// 只回泛化 invalid_argument 的情形；把这几类计数带上，一次复发就能判断是否 schema 所致，
+// 而不必再要全量请求体。
+func auditSchemas(tools []struct {
+	FunctionDeclarations []struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	} `json:"functionDeclarations"`
+}) schemaAudit {
+	var a schemaAudit
+	note := func(tool, what string) {
+		if a.firstBad == "" {
+			a.firstBad = tool + ":" + what
+		}
+	}
+	var walk func(tool string, m map[string]any, depth int)
+	walk = func(tool string, m map[string]any, depth int) {
+		if depth > a.maxDepth {
+			a.maxDepth = depth
+		}
+		props, hasProps := m["properties"].(map[string]any)
+		if hasProps {
+			if _, hasType := m["type"]; !hasType {
+				a.noType++
+				note(tool, "noType")
+			}
+		}
+		if t, _ := m["type"].(string); t == "array" {
+			if _, hasItems := m["items"]; !hasItems {
+				a.arrNoItems++
+				note(tool, "arrNoItems")
+			}
+		}
+		if req, ok := m["required"].([]any); ok {
+			for _, it := range req {
+				name, _ := it.(string)
+				if name == "" {
+					continue
+				}
+				if _, exists := props[name]; !exists {
+					a.reqMissing++
+					note(tool, "reqMissing="+name)
+				}
+			}
+		}
+		if en, ok := m["enum"].([]any); ok {
+			for _, it := range en {
+				if _, isStr := it.(string); !isStr {
+					a.enumNonStr++
+					note(tool, "enumNonStr")
+					break
+				}
+			}
+		}
+		for k := range m {
+			if !geminiSchemaKeys[k] {
+				a.unknownKey++
+				note(tool, "unknownKey="+k)
+			}
+		}
+		for _, child := range props {
+			if cm, ok := child.(map[string]any); ok {
+				walk(tool, cm, depth+1)
+			}
+		}
+		if im, ok := m["items"].(map[string]any); ok {
+			walk(tool, im, depth+1)
+		}
+		if arr, ok := m["anyOf"].([]any); ok {
+			for _, it := range arr {
+				if cm, ok := it.(map[string]any); ok {
+					walk(tool, cm, depth+1)
+				}
+			}
+		}
+	}
+	for _, t := range tools {
+		for _, d := range t.FunctionDeclarations {
+			if len(d.Parameters) == 0 {
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal(d.Parameters, &m); err != nil {
+				note(d.Name, "unparsable")
+				continue
+			}
+			walk(d.Name, m, 1)
+		}
+	}
+	return a
 }

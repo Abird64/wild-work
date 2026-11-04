@@ -145,3 +145,64 @@ func TestDumpFailedOnlyOn400(t *testing.T) {
 		t.Fatalf("400 应取证一次，得 %d", called)
 	}
 }
+
+// TestAuditSchemasFlagsAnomalies schema 审计必须能数出四类语义异常。
+//
+// 上游对它们会给明确文案（property is not defined / only allowed for OBJECT /
+// items: missing field），但历史上也出现过只回泛化 invalid_argument 的情形；
+// 带上这几项计数，一次复发即可判断是否 schema 所致。
+func TestAuditSchemasFlagsAnomalies(t *testing.T) {
+	mk := func(name string, params map[string]any) json.RawMessage {
+		b, _ := json.Marshal(params)
+		return b
+	}
+	type decl = struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	}
+	type grp = struct {
+		FunctionDeclarations []decl `json:"functionDeclarations"`
+	}
+	tools := []grp{{FunctionDeclarations: []decl{
+		{"ok", mk("ok", map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}, "required": []any{"a"}})},
+		{"bad", mk("bad", map[string]any{
+			"properties": map[string]any{"a": map[string]any{"type": "string"}}, // 无 type
+			"required":   []any{"zzz"},                                          // 指向不存在的键
+			"bogus":      true,                                                  // 白名单外
+		})},
+		{"arr", mk("arr", map[string]any{"type": "array"})}, // 无 items
+	}}}
+	a := auditSchemas(tools)
+	if a.noType != 1 || a.reqMissing != 1 || a.arrNoItems != 1 || a.unknownKey != 1 {
+		t.Fatalf("审计计数错误：%+v", a)
+	}
+	if a.firstBad == "" {
+		t.Fatal("应给出首个违规位置")
+	}
+}
+
+// TestAuditSchemasCleanSchemaIsSilent 合规 schema 必须全零（否则摘要噪音会掩盖真问题）。
+func TestAuditSchemasCleanSchemaIsSilent(t *testing.T) {
+	b, _ := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"a": map[string]any{"type": "string", "enum": []any{"x", "y"}},
+			"b": map[string]any{"type": "array", "items": map[string]any{"type": "number"}},
+		},
+		"required": []any{"a"},
+	})
+	type decl = struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	}
+	type grp = struct {
+		FunctionDeclarations []decl `json:"functionDeclarations"`
+	}
+	a := auditSchemas([]grp{{FunctionDeclarations: []decl{{"good", b}}}})
+	if a.reqMissing+a.noType+a.arrNoItems+a.enumNonStr+a.unknownKey != 0 {
+		t.Fatalf("合规 schema 不该报异常：%+v", a)
+	}
+	if a.firstBad != "" {
+		t.Fatalf("合规 schema 不该有 firstBad：%s", a.firstBad)
+	}
+}
