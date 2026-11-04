@@ -308,10 +308,6 @@ func TestFeeChannelOrderCoversAllKinds(t *testing.T) {
 		if k == provider.Qoder {
 			continue // 旧 Qoder 已下线，不应出现在面板
 		}
-		// 豆包两渠道走 CDP、无模型目录接口，属已知无模型面（不是漏登）。
-		if k == provider.Doubao || k == provider.Doubaowork {
-			continue
-		}
 		if !inOrder[k] {
 			t.Errorf("渠道 %s 未登记进 feeChannelOrder ⇒ 费率面板不会出现该渠道 tab", k)
 		}

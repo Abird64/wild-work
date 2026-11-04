@@ -422,8 +422,7 @@ func (a *App) creditsUnit(group string) string {
 	//
 	// 豆包两条渠道共用同一个客户端的同一份额度（同一个账号、同一个接口）：
 	// 5 小时窗口 / 7 天窗口 / 活动赠送额度，全部是 used_percent 形态。
-	if group == provider.Gemini.String() ||
-		group == provider.Doubao.String() || group == provider.Doubaowork.String() {
+	if group == provider.Gemini.String() {
 		return "percent"
 	}
 	return "" // 积分（credits）

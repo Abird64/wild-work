@@ -97,35 +97,3 @@ func TestGeminiCreditsUnitIsPercent(t *testing.T) {
 	}
 }
 
-// TestDoubaoChannelsUsePercentUnit 豆包两条渠道都必须是 percent 口径。
-//
-// 它们的额度就是 used_percent 形态（5 小时窗口 / 7 天窗口 / 活动赠送），
-// 与 Gemini 同类。旧口径下会显示「0 可用积分」，用户看到以为没额度（2026-10-30）。
-func TestDoubaoChannelsUsePercentUnit(t *testing.T) {
-	a := &App{}
-	if got := a.creditsUnit(provider.Doubaowork.String()); got != "percent" {
-		t.Fatalf("豆包工作必须是 percent 口径，得 %q", got)
-	}
-	if got := a.creditsUnit(provider.Doubao.String()); got != "percent" {
-		t.Fatalf("豆包也必须按 percent 处理（渠道已下线，但存量账号兜底），得 %q", got)
-	}
-}
-
-// TestDoubaoworkItemsBecomeWindows 豆包工作的额度条目必须能被提取成窗口。
-//
-// 它的 ResourceItem 已经是 Total=100 / Remain=剩余百分比 的形态（见 doubaowork
-// UserResourceDetail 的 add 闭包），故与 gemini 共用同一套提取判据。
-func TestDoubaoworkItemsBecomeWindows(t *testing.T) {
-	items := []provider.ResourceItem{
-		{Name: "5 小时窗口 (type=1)", Total: 100, Used: 0, Remain: 100, Usable: true},
-		{Name: "7 天窗口 (type=2)", Total: 100, Used: 67, Remain: 33, Usable: true},
-		{Name: "活动赠送额度 (type=3)", Total: 100, Used: 33, Remain: 67, Usable: true},
-	}
-	ws := quotaWindowsFrom(items)
-	if len(ws) != 3 {
-		t.Fatalf("应提取 3 个窗口，得 %d：%+v", len(ws), ws)
-	}
-	if ws[1].Percent != 33 {
-		t.Errorf("7 天窗口百分比错误：%+v", ws[1])
-	}
-}

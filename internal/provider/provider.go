@@ -66,40 +66,6 @@ const (
 	// CodeArts 华为云 CodeArts Agent：对话走华为 snap-access（**SDK-HMAC-SHA256 签名**），
 	// 登录是 PKCE OAuth；头名是否参与签名必须逐字节对齐（`maas_type` 要参与、`Agent-Type` 不参与）。
 	CodeArts Kind = "codearts"
-	// Doubao 豆包（字节，www.doubao.com）—— 本渠道接的是**普通对话**。
-	//
-	// 与其余 20 个渠道的**本质差别**：豆包全站接口受 a_bogus 风控签名保护，而该签名
-	// 无法在服务端复现（三份现存逆向实现无一例外都是「在真浏览器里发请求让前端 hook
-	// 自动签名」，见 docs/豆包渠道调研.md）。因此本渠道不直连上游，而是通过本机
-	// 豆包客户端自带的 DevTools 协议（启动参数 --remote-debugging-port=30813）在页面
-	// 上下文里发起 fetch —— 签名、指纹、msToken 全部由官方前端处理。
-	//
-	// 由此带来三条结构约束：
-	//  ① **零凭据落盘**：cookie 在客户端浏览器里，本渠道的 auth 只有虚拟标识，
-	//     不存任何 token（比 R0.2「零 token 落盘」更彻底）；
-	//  ② **单账号**：一个客户端 = 一个登录态，不存在账号池轮换 ⇒ 置 SingleAccount，
-	//     任何账号级惩罚都等于整条渠道下线，故不罚号、原文透传；
-	//  ③ **有签到**（2026-10-27 实测修正）：侧栏「今日签到领 200 额度 → 立即签到」对应
-	//     `POST /alice/ug/campaign/landing/checkin`，响应带 `idempotent`（重复调用不重复发）。
-	//     早先「未见签到动作」的结论已被截图 + 抓包推翻，详见 internal/doubaocdp/checkin.go。
-	//
-	// ⚠️ **范围边界（易错）**：本渠道只覆盖普通对话。侧栏「新工作任务」是另一个
-	// 产品形态（`/im/conversation/modify` 的 `conversation_type=3` + `model_item_key`
-	// + `reasoning_effort`，并带 office 技能/连接器/飞书文档体系），由 Doubaowork 承接。
-	// 两者共用同一个客户端与调试端口，但协议与模型维度不同，不可混用。
-	Doubao Kind = "doubao"
-	// Doubaowork 豆包**工作任务**（侧栏 Ctrl+N「新工作任务」）—— 与 Doubao 是两个产品形态。
-	//
-	// 协议差异（实测 2026-10-26）：工作任务用 `/im/conversation/modify` 把会话设成
-	// `conversation_type=3`，模型与思考档位也挂在这条消息上（`model_item_key` /
-	// `reasoning_effort` / `mode_id`）；对话正文仍走 `/chat/completion`。
-	// 因为 modify 只能作用于**已存在**的会话，而 conversation_id 要等主消息流开始后
-	// 才由服务端分配，本渠道每条代理请求是四步：建会话 → 改属性 → 发消息 → 删会话。
-	//
-	// 共用设施：CDP 桥与 SSE 切分在 internal/doubaocdp。
-	// 模型维度：界面选择器是 React 内部状态（DOM 无 data-value、bundle 搜不到取值表），
-	// 因此只暴露实测的「自动」(model_item_key=9)，不编造其它档位（R49）。
-	Doubaowork Kind = "doubaowork"
 	// ZCode 智谱 ZCode：Anthropic Messages 形态；请求体 `system` 必须内嵌官方身份块（否则 405/3012）；
 	// 登录是服务端中介设备授权流。⚠️ **积分领取依赖阿里云验证码 + headful 浏览器**，
 	// 本仓不实现领取路径（渠道包注释里注明）。
@@ -134,7 +100,7 @@ func (k Kind) String() string { return string(k) }
 func AllKinds() []Kind {
 	return []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-		Gemini, CodeArts, ZCode, Doubao, Doubaowork}
+		Gemini, CodeArts, ZCode}
 }
 
 func BuiltinKinds() map[string]bool {
