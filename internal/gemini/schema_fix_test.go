@@ -1,7 +1,7 @@
 // schema_fix_test.go 工具 schema 出口一致性归一（2026-11-04，用户实测驱动）。
 //
 // 背景：编程 agent 会话出现**无 details** 的 `400 Request contains an invalid argument.`
-// （详见 R142/R143）。单发对照发现上游对以下语义错误**会明确报错**，而它们全都是
+// （详见 R162/R163）。单发对照发现上游对以下语义错误**会明确报错**，而它们全都是
 // **我们自己的清洗动作制造出来的**：
 //
 //	required 指向不存在的键 → `parameters.required[0]: property is not defined`
