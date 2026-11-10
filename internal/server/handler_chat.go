@@ -89,6 +89,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Model-Auto-Chain", strings.Join(autoChain, ","))
 		}
 		log.Printf("model auto chosen=%s chain=%s", chosen, strings.Join(chain, ","))
+	} else if order := autoOrderFromHeader(r); len(order) > 0 {
+		// 兼容层路径（R167）：`/v1/responses` / `/v1/messages` 已经把 auto 解析成裸模型名
+		// 并重新投递到本层，这里的 peek.Model 不再等于 "auto"。网关把那次决策的**全序**
+		// 经内部头带进来，本层用同一条全序降级——两条路径行为一致（否则 Codex/Claude
+		// 客户端这条路上 auto 只会在静态链上撞空、直接透传上游错误）。
+		// 只影响**降级次序**，不参与选路：首选仍是 body 里那个具体模型。
+		autoOrder = order
 	}
 	rt, model, err := h.runtimeForModel(resolved)
 
@@ -132,7 +139,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var fbID string
 	var primaryAvail bool
 	if len(autoOrder) > 0 {
-		fbID, primaryAvail = h.pickAutoFallback(rt, model, autoOrder, false)
+		fbID, primaryAvail = h.pickAutoFallback(rt, model, autoOrder, false, false)
 	} else {
 		fbID, primaryAvail = h.pickModelFallback(rt, model, false)
 	}
@@ -223,7 +230,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		maxFallbackAttempts = 3
 	}
 	for fbAttempt := 0; ; fbAttempt++ {
-		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, peek.Stream)
+		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, peek.Stream, len(autoOrder) > 0)
 		if res.done {
 			return
 		}
@@ -243,10 +250,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 不变量的设计约束）；此刻未写过任何字节（轮转失败路径天然成立——所有
 		// 写出都发生在成功流式/非流式分支内），降级头可安全补发；无规则/备胎无
 		// 容量 → fb2 为空，维持原样透传，与现状一致。
-		if fbAttempt < maxFallbackAttempts && fallbackWorthy(res.lastKind) && !rt.SingleAccount {
+		// 单账号渠道原本一律不重入（R22：透传是惩罚豁免的设计约束）。auto 请求
+		// 放开这一条（R167）：重入点是**另一个渠道**的模型（skipSameChannel=true），
+		// 不是在唯一账号上反复捶，既不产生惩罚也不违反 R22。
+		if fbAttempt < maxFallbackAttempts && fallbackWorthy(res.lastKind) &&
+			(len(autoOrder) > 0 || !rt.SingleAccount) {
 			fb2 := ""
 			if len(autoOrder) > 0 {
-				fb2, _ = h.pickAutoFallback(rt, model, autoOrder, true)
+				fb2, _ = h.pickAutoFallback(rt, model, autoOrder, true, rt.SingleAccount)
 			} else {
 				fb2, _ = h.pickModelFallback(rt, model, true)
 			}
@@ -295,13 +306,31 @@ type rotationResult struct {
 
 // fallbackWorthy 报告「轮转耗尽后是否值得就地换模型」。
 //
-// 只认两类「本渠道对该模型已无承载能力」的错误：
-//   - ErrHardCredit：积分耗尽 → 账号进 12h 硬冷却，本渠道容量已翻 false；
-//   - ErrSoftRate：模型饱和（14003 Model busy / 6004 usage exceeds frequency
-//     limit）→ 全部账号对该模型都在模型级冷却，轮转已无号可选。
+// 判据只有一条：**本渠道/本账号对该模型已无承载能力**（换模型确实可能换来能力）。
+// 2026-11-10 扩面（R167）——用户报「auto 里的模型额度用完或不能用了不降级」，
+// 原实现只认 402/429 两种，于是「模型在这个渠道下线/不存在」这类最典型的
+// 「不能用了」恰好一个都不降级，被原样透传给客户端。现认五类：
+//   - ErrHardCredit：402 积分/权益耗尽 → 账号进 12h 硬冷却，本渠道容量已翻 false；
+//   - ErrSoftRate：429 模型饱和（14003 Model busy / 6004 usage exceeds frequency
+//     limit）→ 全部账号对该模型都在模型级冷却，轮转已无号可选；
+//   - ErrModelBlocked：11102「该后端无此模型」→ 该 (账号,模型) 组合本就不成立；
+//   - ErrNotFound：404 模型/端点不存在 → 换号已试尽，继续重试没有意义；
+//   - ErrAccountFault：11140/14017 账号级授权/配额故障 → 整号已失去承载该模型的能力。
 //
-// 其余错误不换模型：内容类/请求类错误换模型必然复现（换模型只是白烧备胎额度），
-// 5xx/登录态问题换模型也治不了本，原样透传让客户端与运维看到真实原因。
+// 仍**不**换模型的两类（各自有独立理由，别顺手扩）：
+//   - 内容/请求类（ErrContentBlocked / ErrPromptTooLong / ErrImageInvalid /
+//     ErrBadParams / ErrPassthrough）：换模型必然复现，只会白烧备胎额度；
+//   - ErrServer（5xx）与 ErrSessionDead（登录态）：换模型治不了本。5xx 有 2026-10-20
+//     实测（同一波里 4 个号全 500，换号只是把 1 次失败放大成 9 次）；SessionDead 需要
+//     人工重登，把它换成"看起来成功的另一个模型"会让运维彻底看不见该去重登哪个号。
 func fallbackWorthy(kind provider.ErrKind) bool {
-	return kind == provider.ErrHardCredit || kind == provider.ErrSoftRate
+	switch kind {
+	case provider.ErrHardCredit, // 402 积分/权益耗尽（额度用完的常规形态）
+		provider.ErrSoftRate,     // 429 模型饱和（14003 / 6004）
+		provider.ErrModelBlocked, // 11102 该后端无此模型 → 模型在这个渠道"不存在"
+		provider.ErrNotFound,     // 404 模型/端点不存在（换号已试尽，剩下一层才是模型面）
+		provider.ErrAccountFault: // 11140/14017 账号授权/配额故障（整号失去该模型承载）
+		return true
+	}
+	return false
 }

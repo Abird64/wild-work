@@ -212,12 +212,18 @@ type chatRequest = map[string]any
 // 降级标注头必须在此统一转写：两个兼容端点都经由本函数拿内层响应，而外层响应体
 // 是**重建**的（model 字段按客户端请求名回填，见 R15 口径），不搬该头就等于静默换模型。
 // 调用时机在设计上就安全：本函数在两条路径的首个 WriteHeader 之前。
-func (g *Gateway) callChat(w http.ResponseWriter, r *http.Request, req chatRequest, stream bool) (*innerResult, error) {
+func (g *Gateway) callChat(w http.ResponseWriter, r *http.Request, req chatRequest, stream bool, autoOrder []string) (*innerResult, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	res, err := g.call(r.Context(), "/v1/chat/completions", body, g.key())
+	// 自动选路的降级全序必须**带进内层**（R167）：本层已把 `auto` 换成裸模型名，
+	// 内层若拿不到这个头就只能走静态降级链，而那条链对 auto 选出的模型一条都不命中。
+	var extras []string
+	if hdr := strings.Join(autoOrder, ","); strings.TrimSpace(hdr) != "" {
+		extras = []string{auto.OrderHeader, hdr}
+	}
+	res, err := g.call(r.Context(), "/v1/chat/completions", body, g.key(), extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +276,7 @@ func parseJSONBody(w http.ResponseWriter, r *http.Request, anthropicShape bool, 
 }
 
 // resolveModel 解析模型名（无能力要求版本：常驻客户端传的普通模型名）。
-func (g *Gateway) resolveModel(w http.ResponseWriter, model string, anthropicShape bool) (string, bool) {
+func (g *Gateway) resolveModel(w http.ResponseWriter, model string, anthropicShape bool) (string, []string, bool) {
 	return g.resolveModelReq(w, model, anthropicShape, auto.Request{})
 }
 
@@ -280,9 +286,9 @@ func (g *Gateway) resolveModel(w http.ResponseWriter, model string, anthropicSha
 // （否则用户配一条 `auto -> x` 就能把整套选路静默架空）。
 // 解析失败语义与内层 handler 对齐：未注入/未启用 ⇒ 400 invalid_model；
 // 已启用但无候选 ⇒ 400 invalid_model 并指向面板预览（兼容层没有 503 的语义位）。
-func (g *Gateway) resolveModelReq(w http.ResponseWriter, model string, anthropicShape bool, req auto.Request) (string, bool) {
+func (g *Gateway) resolveModelReq(w http.ResponseWriter, model string, anthropicShape bool, req auto.Request) (string, []string, bool) {
 	if strings.EqualFold(strings.TrimSpace(model), auto.Alias) {
-		chosen, chain, _, ok := g.autoDecide(req)
+		chosen, chain, order, ok := g.autoDecide(req)
 		if !ok {
 			if anthropicShape {
 				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
@@ -291,15 +297,15 @@ func (g *Gateway) resolveModelReq(w http.ResponseWriter, model string, anthropic
 				writeOpenAIError(w, http.StatusBadRequest, "invalid_model",
 					"model \"auto\" 未启用或当前没有可用候选：请在面板「自动选路」开启并预览候选剔除原因")
 			}
-			return "", false
+			return "", nil, false
 		}
 		w.Header().Set("X-Model-Origin", "auto")
 		w.Header().Set("X-Model-Auto-Chosen", chosen)
 		if len(chain) > 1 {
 			w.Header().Set("X-Model-Auto-Chain", strings.Join(chain, ","))
 		}
-		logf("auto: model=auto chosen=%s chain=%s", chosen, strings.Join(chain, ","))
-		return chosen, true
+		logf("auto: model=auto chosen=%s chain=%s order=%d", chosen, strings.Join(chain, ","), len(order))
+		return chosen, order, true
 	}
 	var resolved string
 	var rerr error
@@ -312,9 +318,9 @@ func (g *Gateway) resolveModelReq(w http.ResponseWriter, model string, anthropic
 		} else {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_model", rerr.Error())
 		}
-		return "", false
+		return "", nil, false
 	}
-	return resolved, true
+	return resolved, nil, true
 }
 
 // handleSystemOne 处理 POST /v1/systemone —— Jev 结构化决策端点。

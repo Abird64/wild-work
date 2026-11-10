@@ -28,7 +28,7 @@ func (g *Gateway) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 func (g *Gateway) anthropicMessages(w http.ResponseWriter, r *http.Request, body map[string]any) {
 	model := asString(body["model"])
 	// 同 responses：能力要求按请求体现取（Anthropic 的 image 块、tools、thinking 都在体内）。
-	resolved, ok := g.resolveModelReq(w, model, true, auto.RequestFromMap(body))
+	resolved, autoOrder, ok := g.resolveModelReq(w, model, true, auto.RequestFromMap(body))
 	if !ok {
 		return
 	}
@@ -44,7 +44,7 @@ func (g *Gateway) anthropicMessages(w http.ResponseWriter, r *http.Request, body
 	}
 	stream := asBool(body["stream"])
 
-	res, err := g.callChat(w, r, req, stream)
+	res, err := g.callChat(w, r, req, stream, autoOrder)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return

@@ -71,7 +71,7 @@ func TestPickAutoFallbackWalksBeyondDisplayChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeForModel(%q) 失败：%v", order[0], err)
 	}
-	got, primaryAvail := h.pickAutoFallback(rt, model, order, false)
+	got, primaryAvail := h.pickAutoFallback(rt, model, order, false, false)
 	if primaryAvail {
 		t.Fatal("首要模型已全冷，primaryAvail 应为 false")
 	}
@@ -102,7 +102,7 @@ func TestPickAutoFallbackEmptyWhenAllDead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeForModel 失败：%v", err)
 	}
-	if got, _ := h.pickAutoFallback(rt, model, order, false); got != "" {
+	if got, _ := h.pickAutoFallback(rt, model, order, false, false); got != "" {
 		t.Fatalf("全序全冷时应返回空串，实际 %q", got)
 	}
 }
@@ -116,7 +116,7 @@ func TestPickAutoFallbackSkipsSelf(t *testing.T) {
 	for _, s := range rt.Pool.List() {
 		rt.Pool.CooldownModel(s.UID, "deepseek-v4-pro", 10*time.Minute, "test")
 	}
-	got, _ := h.pickAutoFallback(rt, "deepseek-v4-pro", order, false)
+	got, _ := h.pickAutoFallback(rt, "deepseek-v4-pro", order, false, false)
 	if got == "workbuddy/deepseek-v4-pro" {
 		t.Fatal("不得把自己当作备胎（空转）")
 	}

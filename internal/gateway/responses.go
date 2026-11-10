@@ -45,7 +45,7 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 	model := asString(body["model"])
 	// 能力要求按请求体现取（tools / 图像 / 推理 / max_tokens）：`model:"auto"` 时
 	// 打分引擎靠这三项做硬门，探测口径与内层共用 auto.RequestFromMap，不会两套判据。
-	resolved, ok := g.resolveModelReq(w, model, false, auto.RequestFromMap(body))
+	resolved, autoOrder, ok := g.resolveModelReq(w, model, false, auto.RequestFromMap(body))
 	if !ok {
 		return
 	}
@@ -57,7 +57,7 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := g.callChat(w, r, req, stream)
+	res, err := g.callChat(w, r, req, stream, autoOrder)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_unavailable", err.Error())
 		return

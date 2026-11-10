@@ -51,7 +51,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R166）
+## 1. 决议项索引（R1–R167）
 
 **逐条摘要在 [`docs/决议索引.md`](docs/决议索引.md)；全文（证据链、反例、已知限制）在 [`docs/决议项.md`](docs/决议项.md)** —— 本文件不再保存 R 条目。
 
@@ -248,6 +248,15 @@ Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）；
 `app.SetSceneRouting` 也拒收该键（`scene_reserved_alias`）。别名的**降级**走 auto 决策的
 「全序」（`Decision.Order`，覆盖全部候选），`fallback_depth` 只约束响应头里展示的条数。
 
+`auto` 还有一条**跨层**约定（R167）：`/v1/responses` 与 `/v1/messages` 上 auto 由网关
+就地解析成裸模型名再投给内层，内层已认不出 auto，故网关把那次决策的全序经**内部头**
+`X-Wild-Work-Auto-Order`（常量 `auto.OrderHeader`）带进内层，内层 `autoOrderFromHeader`
+解析后与自解析路径共用同一套降级代码。该头**只影响降级次序、不参与选路**，非 auto
+请求不发送；客户端伪造也无害（不能绕过鉴权、不能指定上游端点）。
+可降级错误集同时从「402/429 两类」扩到五类（加 `model_blocked`/`not_found`/`account_fault`），
+其中这三类**只在 auto 作用域内**真正触发（`fallback_dimension_test.go` 的
+`autoScopeOnlyKinds` 显式锁定），非 auto 请求仍是「冷却 + 原文透传」。
+
 **各渠道协议要点、凭据模型、已知限制与踩坑**见 [`docs/渠道接入备忘.md`](docs/渠道接入备忘.md)。
 
 ---
@@ -346,8 +355,8 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 关键不变量 + 构建发版（决议摘要已下沉到 docs/决议索引.md） |
-| [docs/决议索引.md](docs/决议索引.md) | R1–R166 **逐条摘要**（按编号/关键词定点 grep，勿整篇读） |
-| [docs/决议项.md](docs/决议项.md) | **R1–R166 决议全文**（证据链、反例、已知限制） |
+| [docs/决议索引.md](docs/决议索引.md) | R1–R167 **逐条摘要**（按编号/关键词定点 grep，勿整篇读） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R167 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

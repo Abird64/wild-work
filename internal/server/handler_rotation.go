@@ -33,7 +33,10 @@ import (
 func (h *Handler) serveRotation(
 	w http.ResponseWriter, sw *statWriter, rt *Runtime, model string, body []byte,
 	clientModel, dispModel, acctModel string, statRow *statsEngine.ReqRow, stream bool,
+	autoScope bool,
 ) (res rotationResult) {
+	// autoScope：本次请求是否由自动选路驱动（内层识别 auto / 或兼容层经内部头带入全序）。
+	// 只影响「模型面失效时是否交回调用方换模型」，不改变任何账号级惩罚（R167）。
 	res.done = true // 默认：既有 return 出口都已把响应写完（成功/请求级错误/诊断引导）
 	tried := map[string]bool{}
 	var lastErr error
@@ -129,6 +132,17 @@ func (h *Handler) serveRotation(
 				// 误以为「工具把这个错误当成了请求级问题」，掩盖了真实原因（issue #117）。
 				log.Printf("upstream error platform=%s uid=%s status=%d kind=%s body=%s（单账号渠道无号可轮换，故原样透传、不冷却）",
 					rt.Kind, acct.UID, status, kind, truncateBody(respBody))
+				// R167：auto 请求例外——「本渠道唯一账号对这个模型无承载能力」（402/429/4xx
+				// 模型面）时，交回调用方按**决策全序**换到另一个渠道的模型继续，而不是把
+				// 上游错误砸给客户端。这里**不施加任何惩罚**（R22 不变），只是不再替用户
+				// 提前放弃：auto 的全部意义就是「这个不行就换下一个」。
+				if autoScope && fallbackWorthy(kind) {
+					res.done = false
+					res.lastKind = kind
+					res.lastStatus = status
+					res.lastBody = respBody
+					return
+				}
 				transparentError(w, status, respBody)
 				return
 			}
@@ -179,6 +193,17 @@ func (h *Handler) serveRotation(
 				escalated := rt.Pool.CooldownModel(acct.UID, model, h.cfg.SoftCooldown, kind.String())
 				log.Printf("model cooldown platform=%s uid=%s model=%s escalated=%v reason=%s",
 					rt.Kind, acct.UID, model, escalated, kind)
+				// R167：auto 请求把「上游根本没有这个模型」交回调用方换模型——
+				// (账号,模型) 负缓存已经生效，本次继续透传等于让用户白等一次失败。
+				// 非 auto 请求保持原行为（原文透传）：那是客户端显式点名一个模型，
+				// 静默换成另一个模型回答会让「写错模型名」变成"看起来成功"。
+				if autoScope {
+					res.done = false
+					res.lastKind = kind
+					res.lastStatus = status
+					res.lastBody = respBody
+					return
+				}
 				transparentError(w, status, respBody)
 				return
 			case provider.ErrWafBlock, provider.ErrAccountFault:

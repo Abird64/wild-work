@@ -164,6 +164,20 @@ type Weights struct {
 // （auto 不是渠道名）⇒ 裸名才能同时被内层与兼容层识别（R165）。
 const Alias = "auto"
 
+// OrderHeader 是兼容层（gateway）把「本次请求的降级全序」交给内层时用的**内部头**。
+//
+// 为什么需要它（R167）：`/v1/responses` 与 `/v1/messages` 先在本层把 `auto` 解析成
+// 具体模型名，再经 `Gateway.call()` 重新投递给内层 `/v1/chat/completions`；
+// 内层拿到的 model 已是**裸模型名**（不带 auto 语义），`isAutoModel` 恒假 ⇒
+// `autoOrder` 为空 ⇒ 请求内重入走 `pickModelFallback`（静态降级链的 From 是按具体
+// 模型名配的，对 auto 选出来的 `kilo/…` 一条都不命中）⇒ **Codex/Claude 客户端这条路径
+// 上 auto 实际上从不降级**。带上这个头，内层就能按同一条全序降级。
+//
+// 语义边界：**只影响降级次序，不参与选路**（首选已在 body 里给定）。客户端自己伪造它
+// 也拿不到任何越权能力——它只能影响「自己这次请求失败后换哪个模型再试」，而这些模型
+// 本来就都在 /v1/models 里可见可调。空串/单条/格式不合法 ⇒ 忽略（零行为变化）。
+const OrderHeader = "X-Wild-Work-Auto-Order"
+
 // Config 自动选路的可调项。零值 Weights ⇒ 用默认值（老配置直接跑）。
 type Config struct {
 	// Enabled 是否启用自动选路。

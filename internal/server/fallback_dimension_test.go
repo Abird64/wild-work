@@ -4,6 +4,7 @@
 //
 //	账号维度 → 换号重试（Rotatable）
 //	模型维度 → 换模型（fallbackWorthy），且必须在换号耗尽之后
+//	           （R167 例外：autoScopeOnlyKinds 在 auto 作用域内也换模型）
 //	请求维度 → 原样透传，既不换号也不换模型，也不冷却
 //
 // 三个维度互斥：一个错误类型要么属于请求维度（零动作），要么属于账号/模型维度
@@ -70,6 +71,21 @@ func dimensionOf(kind provider.ErrKind) string {
 	}
 }
 
+// autoScopeOnlyKinds 是「只有 auto 请求才会真正触发换模型」的错误类别（R167）。
+//
+// 为什么需要这一层：这三类在轮转里都是**提前 return**的出口（ErrModelBlocked 原文透传、
+// ErrNotFound/ErrAccountFault 换号耗尽后透传），只有调用方明确处在 auto 作用域
+// （`serveRotation(autoScope=true)`）时才会被交回降级循环。它们的账号级处置一个都没变
+// ——扩的只是「谁来兜底」。
+//
+// 显式列出而不是从代码推断：新增 ErrKind 若想进入这一档，必须同时改这里，否则本测试
+// 与生产代码不一致而报错——这正是维度矩阵存在的意义。
+var autoScopeOnlyKinds = map[provider.ErrKind]bool{
+	provider.ErrModelBlocked: true,
+	provider.ErrNotFound:     true,
+	provider.ErrAccountFault: true,
+}
+
 // TestFallbackDimensionCoverage 遍历全量 ErrKind，断言四维归属唯一且自洽。
 //
 // 锁定的不变量：
@@ -96,6 +112,9 @@ func TestFallbackDimensionCoverage(t *testing.T) {
 			if !rotatable {
 				t.Errorf("%s 属模型维度，应先换号（Rotatable=false）——顺序消解要求先试便宜的", kind)
 			}
+			if autoScopeOnlyKinds[kind] {
+				t.Errorf("%s 既属模型维度又被标为 auto 专用——归属表自相矛盾", kind)
+			}
 			if !fallback {
 				t.Errorf("%s 属模型维度，必须可换模型（fallbackWorthy=false）——否则饱和时首个请求必吃 429", kind)
 			}
@@ -103,14 +122,16 @@ func TestFallbackDimensionCoverage(t *testing.T) {
 			if !rotatable {
 				t.Errorf("%s 属账号维度，应可换号（Rotatable=false）", kind)
 			}
-			if fallback {
+			// R167：账号维度里只有 autoScopeOnlyKinds 允许换模型（且只在 auto 作用域内
+			// 真正触发），其余仍不得换模型——换模型治不了账号问题。
+			if fallback && !autoScopeOnlyKinds[kind] {
 				t.Errorf("%s 属账号维度，不应换模型（fallbackWorthy=true）——换模型治不了账号问题", kind)
 			}
 		case "account-transparent":
 			if rotatable {
 				t.Errorf("%s 应直接透传不换号（Rotatable=true）——上游结论确定，换号只会再撞一次", kind)
 			}
-			if fallback {
+			if fallback && !autoScopeOnlyKinds[kind] {
 				t.Errorf("%s 不应换模型（fallbackWorthy=true）", kind)
 			}
 		case "upstream-transparent":
@@ -139,9 +160,13 @@ func TestErrNoneHasNoAction(t *testing.T) {
 // TestFallbackWorthyIsSubsetOfRotatable 降级链的硬前提：能换模型的必须能换号。
 //
 // 这锁定「顺序消解」——换模型永远发生在换号耗尽之后，不存在「跳过换号直接换模型」。
+//
+// 唯一豁免是 autoScopeOnlyKinds 里的 ErrModelBlocked（R167）：它按设计**不换号**
+// ——11102 是 `(账号,模型)` 负缓存，换号只会让同一批账号接连被冻（2026-10-18 事故），
+// 所以它在轮转里提前返回，唯一的后续动作就是 auto 作用域内的换模型。
 func TestFallbackWorthyIsSubsetOfRotatable(t *testing.T) {
 	for _, kind := range allErrKinds {
-		if fallbackWorthy(kind) && !kind.Rotatable() {
+		if fallbackWorthy(kind) && !kind.Rotatable() && !autoScopeOnlyKinds[kind] {
 			t.Errorf("%s 可换模型但不可换号——违反顺序消解（必须先换号、耗尽才换模型）", kind)
 		}
 	}

@@ -297,8 +297,14 @@ func TestEntryFallbackAllowsSameChannel(t *testing.T) {
 	}
 }
 
-// TestFallbackWorthyKinds 白名单锁定：只有「本渠道确实顶不住」的两类错误换模型。
-// 误把 ErrServer/ErrClient/内容类错误纳入会导致每个上游抖动都白烧一份备胎额度。
+// TestFallbackWorthyKinds 白名单锁定：只有「本渠道/本账号对该模型已无承载能力」的错误换模型。
+//
+// 2026-11-10 扩面（R167）：用户报「auto 里的模型额度用完或不能用了不降级」，原白名单
+// 只有 402/429 两类，于是「模型在这个渠道根本不存在」（11102/404）这类最字面的
+// 「不能用了」一个都不降级。现认五类：hard_credit / soft_rate / model_blocked /
+// not_found / account_fault。
+// 仍必须为 false 的是**换模型必然复现**（内容/参数/请求形态）与**换模型治不了本**
+// （5xx、登录态）的两组，误纳入只会白烧备胎额度或掩盖该人工处理的问题。
 func TestFallbackWorthyKinds(t *testing.T) {
 	cases := []struct {
 		kind provider.ErrKind
@@ -306,12 +312,18 @@ func TestFallbackWorthyKinds(t *testing.T) {
 	}{
 		{provider.ErrHardCredit, true},
 		{provider.ErrSoftRate, true},
+		{provider.ErrModelBlocked, true}, // 11102 该后端无此模型（R167）
+		{provider.ErrNotFound, true},     // 404 模型/端点不存在（R167）
+		{provider.ErrAccountFault, true}, // 11140/14017 账号授权/配额故障（R167）
 		{provider.ErrServer, false},
 		{provider.ErrClient, false},
 		{provider.ErrSessionDead, false},
-		{provider.ErrNotFound, false},
+		{provider.ErrWafBlock, false},
 		{provider.ErrContentBlocked, false},
 		{provider.ErrPromptTooLong, false},
+		{provider.ErrImageInvalid, false},
+		{provider.ErrBadParams, false},
+		{provider.ErrQueued, false},
 		{provider.ErrPassthrough, false},
 		{provider.ErrNone, false},
 	}

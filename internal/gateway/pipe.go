@@ -94,7 +94,7 @@ func (g *Gateway) bodyLimit() int64 {
 //
 // apiKey 非空时以 `Authorization: Bearer <apiKey>` 形式注入，让内层 withAuth 正常放行；
 // 调用方应确保该 key 已经过校验（或直接来自请求方，由内层自行拒绝）。
-func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey string) (*innerResult, error) {
+func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey string, extraHdr ...string) (*innerResult, error) {
 	pr, pw := io.Pipe()
 	ctx, cancel := context.WithCancel(parent)
 	p := newPipeRW(pw)
@@ -112,6 +112,13 @@ func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey 
 	req.RemoteAddr = "127.0.0.1:0" // 内层若记录来源地址，避免空串
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	// extraHdr 是 key/value 交替的内部头（R167：Layer→内层的 auto 降级全序）。
+	// 只在本层已经认过的调用点传入，取值一律由本层自己生成，不搬客户端头族。
+	for i := 0; i+1 < len(extraHdr); i += 2 {
+		if k := extraHdr[i]; k != "" {
+			req.Header.Set(k, extraHdr[i+1])
+		}
 	}
 
 	go func() {
