@@ -7,9 +7,12 @@ package server
 import (
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/provider"
 )
 
@@ -57,7 +60,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) modelList() []map[string]any {
-	out := []map[string]any{}
+	out := h.virtualModelEntries()
 	for _, k := range h.runtimeKinds() {
 		rt := h.getRuntime(k)
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 { // 只暴露已接入账号的平台
@@ -72,6 +75,60 @@ func (h *Handler) modelList() []map[string]any {
 		}
 	}
 	return out
+}
+
+// virtualModelEntries 暴露「不是上游模型、但客户端可以直接填」的路由别名（R165）。
+//
+// 两个来源：
+//   - `auto`：自动选路别名（只有解析器已注入时才列，否则填了会 400）；
+//   - `compat.model_map` 里的**裸名键**（不带 `/` 的场景别名，如 custom / fast / complex）。
+//     带 `/` 的键是模型名映射而非别名，列出来只会让客户端以为那是可填的模型。
+//
+// owned_by 统一为 "wild-work"：客户端（含 Claude Code 之类会按 owned_by 分类的）能一眼
+// 区分「这是本机的路由别名」而不是某个上游的模型。
+func (h *Handler) virtualModelEntries() []map[string]any {
+	out := []map[string]any{}
+	if h.hasAutoResolver() {
+		out = append(out, map[string]any{
+			"id": auto.Alias, "object": "model", "created": 1753600000, "owned_by": "wild-work",
+			"description": "自动选路：按免费额度/余额/质价比当场选择具体模型（响应头 X-Model-Auto-Chosen 给出实际模型）",
+		})
+	}
+	h.mmMu.RLock()
+	keys := make([]string, 0, len(h.modelMap))
+	for k := range h.modelMap {
+		k = strings.TrimSpace(k)
+		if k == "" || strings.ContainsRune(k, '/') || strings.EqualFold(k, auto.Alias) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	h.mmMu.RUnlock()
+	sort.Strings(keys)
+	for _, k := range keys {
+		desc := "场景别名：" + strings.TrimSpace(h.aliasTarget(k))
+		// R165：fast/code/complex 已收编为 custom，normalize 把它们保留为**转发键**
+		// （客户端里写死旧名的配置不能因为收编直接 400）。列表里必须标明这是旧名，
+		// 否则用户看到四个别名会以为还有四套行为。
+		if legacySceneAliases[k] {
+			desc = "旧名（R165 收编为 custom，等价转发）：" + strings.TrimSpace(h.aliasTarget(k))
+		}
+		out = append(out, map[string]any{
+			"id": k, "object": "model", "created": 1753600000, "owned_by": "wild-work",
+			"description": desc,
+		})
+	}
+	return out
+}
+
+// legacySceneAliases 是被 R165 收编的三个历史场景别名（服务端保留为转发键，面板不再可编辑）。
+var legacySceneAliases = map[string]bool{"fast": true, "code": true, "complex": true}
+
+// aliasTarget 返回别名的映射目标（未命中给空串；只读，加锁在内部完成）。
+func (h *Handler) aliasTarget(name string) string {
+	h.mmMu.RLock()
+	defer h.mmMu.RUnlock()
+	return h.modelMap[name]
 }
 
 // buildModelEntry 构造单条 /v1/models 条目。

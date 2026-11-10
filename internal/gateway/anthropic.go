@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/provider"
 )
 
@@ -26,7 +27,8 @@ func (g *Gateway) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 func (g *Gateway) anthropicMessages(w http.ResponseWriter, r *http.Request, body map[string]any) {
 	model := asString(body["model"])
-	resolved, ok := g.resolveModel(w, model, true)
+	// 同 responses：能力要求按请求体现取（Anthropic 的 image 块、tools、thinking 都在体内）。
+	resolved, ok := g.resolveModelReq(w, model, true, auto.RequestFromMap(body))
 	if !ok {
 		return
 	}

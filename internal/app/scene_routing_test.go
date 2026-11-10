@@ -16,7 +16,7 @@ import (
 	"wild-work/internal/server"
 )
 
-// sceneBody 构造一次合法提交（三场景齐全），extra 覆盖/补充顶层键。
+// sceneBody 构造一次合法提交（自定义场景齐全），extra 覆盖/补充顶层键。
 func sceneBody(t *testing.T, scenes []sceneSubmit, extra map[string]any) string {
 	t.Helper()
 	body := map[string]any{
@@ -34,12 +34,10 @@ func sceneBody(t *testing.T, scenes []sceneSubmit, extra map[string]any) string 
 	return string(raw)
 }
 
-// goodScenes 三场景基线：三主模型互不相同、备胎非空且不自环、首备胎跨渠道。
+// goodScenes 场景基线（R165：可编辑场景只剩一个 custom）：备胎非空且不自环、首备胎跨渠道。
 func goodScenes() []sceneSubmit {
 	return []sceneSubmit{
-		{Alias: "fast", From: "workbuddy/deepseek-v4.1-flash", To: []string{"raccoon/sn-kimi-k3", "traework/deepseek-v3"}},
-		{Alias: "code", From: "workbuddy/claude-sonnet-4.5", To: []string{"traework/claude-sonnet-4.5"}},
-		{Alias: "complex", From: "raccoon/sn-kimi-k3-max", To: []string{"workbuddy/deepseek-v4.1-flash"}},
+		{Alias: "custom", From: "raccoon/sn-kimi-k3-max", To: []string{"workbuddy/deepseek-v4.1-flash", "traework/deepseek-v3"}},
 	}
 }
 
@@ -59,14 +57,14 @@ func readCfgBytes(t *testing.T, path string) []byte {
 	return raw
 }
 
-// seedOtherEntries 在 a.cfg 里塞入「不属于三场景」的既有内容：
+// seedOtherEntries 在 a.cfg 里塞入「不属于自定义场景」的既有内容：
 // model_map 其它键 + 一条无关降级链规则。用于验证整体替换陷阱（SR-001 §3.1）。
 func seedOtherEntries(t *testing.T, a *App) {
 	t.Helper()
 	a.mu.Lock()
 	a.cfg.Compat.ModelMap = map[string]string{
 		"gpt-fast*": "workbuddy/deepseek-v4.1-flash", // 用户自建的通配别名 + 非场景键
-		"fast":      "workbuddy/deepseek-v4.1-flash", // 场景键（会被本端点覆盖）
+		"custom":    "workbuddy/deepseek-v4.1-flash", // 场景键（会被本端点覆盖）
 	}
 	a.cfg.Compat.DefaultChannel = "raccoon"
 	a.cfg.Compat.MaxTokensCap = 8192
@@ -77,7 +75,7 @@ func seedOtherEntries(t *testing.T, a *App) {
 	a.mu.Unlock()
 }
 
-// TestSceneRoutingHappyPath 合法提交：200 + 三场景落地 + 一次落盘 + 双 syncer 各推一次。
+// TestSceneRoutingHappyPath 合法提交：200 + 场景落地 + 一次落盘 + 双 syncer 各推一次。
 func TestSceneRoutingHappyPath(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	seedOtherEntries(t, a)
@@ -110,7 +108,7 @@ func TestSceneRoutingHappyPath(t *testing.T) {
 		t.Errorf("响应 ok=%v dry_run=%v", res.OK, res.DryRun)
 	}
 
-	// 内存态：三个别名键就位。
+	// 内存态：别名键就位。
 	a.mu.Lock()
 	mm := a.cfg.Compat.ModelMap
 	fallback := a.cfg.ModelFallback
@@ -125,9 +123,9 @@ func TestSceneRoutingHappyPath(t *testing.T) {
 		t.Errorf("default_channel=%q max_tokens_cap=%d，期望 workbuddy/32000", dc, cap)
 	}
 
-	// 三条场景规则 + 用户自建规则，共 4 条。
-	if len(fallback) != 4 {
-		t.Fatalf("model_fallback 应 4 条（3 场景 + 1 自建），实际 %d: %+v", len(fallback), fallback)
+	// 一条场景规则 + 用户自建规则，共 2 条（R165：可编辑场景只剩 custom）。
+	if len(fallback) != 2 {
+		t.Fatalf("model_fallback 应 2 条（1 场景 + 1 自建），实际 %d: %+v", len(fallback), fallback)
 	}
 	byFrom := map[string][]string{}
 	for _, r := range fallback {
@@ -156,11 +154,11 @@ func TestSceneRoutingHappyPath(t *testing.T) {
 	if compatCalls != 1 || fbCalls != 1 {
 		t.Errorf("syncer 调用次数 compat=%d fb=%d，期望各 1", compatCalls, fbCalls)
 	}
-	if gotCompatMap["fast"] != "workbuddy/deepseek-v4.1-flash" {
+	if gotCompatMap["custom"] != "raccoon/sn-kimi-k3-max" {
 		t.Errorf("compatSyncer 收到的 model_map 不含新值: %v", gotCompatMap)
 	}
-	if len(gotRules) != 4 {
-		t.Errorf("fbSyncer 收到 %d 条规则，期望 4", len(gotRules))
+	if len(gotRules) != 2 {
+		t.Errorf("fbSyncer 收到 %d 条规则，期望 2", len(gotRules))
 	}
 }
 
@@ -171,19 +169,23 @@ func TestSceneRoutingRejectsAliasInModel(t *testing.T) {
 		mutFn func([]sceneSubmit) []sceneSubmit
 	}{
 		{"from 等于别名", func(s []sceneSubmit) []sceneSubmit {
-			s[0].From = "fast"
+			s[0].From = "custom"
 			return s
 		}},
 		{"from 带渠道前缀但是别名", func(s []sceneSubmit) []sceneSubmit {
-			s[0].From = "workbuddy/fast"
+			s[0].From = "workbuddy/custom"
 			return s
 		}},
 		{"to 等于别名", func(s []sceneSubmit) []sceneSubmit {
-			s[0].To = []string{"code"}
+			s[0].To = []string{"custom"}
 			return s
 		}},
 		{"to 含别名（非首位）", func(s []sceneSubmit) []sceneSubmit {
-			s[1].To = []string{"raccoon/sn-kimi-k3", "complex"}
+			s[0].To = []string{"raccoon/sn-kimi-k3", "custom"}
+			return s
+		}},
+		{"to 含已退役别名 code", func(s []sceneSubmit) []sceneSubmit {
+			s[0].To = []string{"workbuddy/deepseek-v4.1-flash", "code"}
 			return s
 		}},
 	}
@@ -227,7 +229,7 @@ func TestSceneRoutingRejectsMapMismatch(t *testing.T) {
 	path := cfgFilePath(a)
 
 	mismatch := map[string]string{
-		"fast":     "workbuddy/deepseek-v4.1-flash", // 场景提交的是 raccoon/... → 冲突
+		"custom":   "workbuddy/deepseek-v4.1-flash", // 场景提交的是 oczen/... → 冲突
 		"gpt-fast": "workbuddy/deepseek-v4.1-flash",
 	}
 	scenes := goodScenes()
@@ -252,20 +254,20 @@ func TestSceneRoutingRejectsBadAliasSet(t *testing.T) {
 		name   string
 		scenes func() []sceneSubmit
 	}{
-		{"少一个（只给两个）", func() []sceneSubmit {
-			s := goodScenes()
-			return s[:2]
-		}},
+		{"少一个（一个都不给）", func() []sceneSubmit { return nil }},
 		{"多一个（第四个未知别名）", func() []sceneSubmit {
 			s := goodScenes()
 			return append(s, sceneSubmit{Alias: "chat", From: "workbuddy/x", To: []string{"raccoon/y"}})
 		}},
-		{"重复别名顶替缺失别名", func() []sceneSubmit {
+		{"重复别名", func() []sceneSubmit {
 			s := goodScenes()
-			s[2].Alias = "fast" // 3 个但集合缺 complex
+			return append(s, goodScenes()...)
+		}},
+		{"已退役别名 fast", func() []sceneSubmit {
+			s := goodScenes()
+			s[0].Alias = "fast"
 			return s
 		}},
-		{"空数组", func() []sceneSubmit { return nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,6 +287,23 @@ func TestSceneRoutingRejectsBadAliasSet(t *testing.T) {
 				t.Errorf("校验失败却写入了 config.json：%s", string(got))
 			}
 		})
+	}
+}
+
+// TestSceneRoutingRejectsReservedAuto R165：`auto` 是自动选路的保留名，不得作为场景别名。
+//
+// 允许它进别名表会造成最坏的一类静默失效：客户端写 `auto` 拿到的是用户映射的固定模型，
+// 而用户以为自己开的是自动选路。
+func TestSceneRoutingRejectsReservedAuto(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	mux := panelMux(a)
+	body := sceneBody(t, []sceneSubmit{{Alias: "auto", From: "workbuddy/x", To: []string{"raccoon/y"}}}, nil)
+	w := doReq(mux, "POST", "/api/config/scene_routing", body, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("保留名 auto 应 400，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "scene_reserved_alias") {
+		t.Errorf("错误码应为 scene_reserved_alias，实际 %s", w.Body.String())
 	}
 }
 
@@ -319,14 +338,14 @@ func TestSceneRoutingDryRunDoesNotPersist(t *testing.T) {
 	if !res.DryRun || res.DefaultChannel != "oczen" || res.MaxTokensCap != 4096 {
 		t.Errorf("dry_run 清单不对: %+v", res)
 	}
-	var dryFastTo []string
+	var dryTo []string
 	for _, r := range res.ModelFallback {
-		if r.From == "workbuddy/deepseek-v4.1-flash" {
-			dryFastTo = r.To
+		if r.From == "raccoon/sn-kimi-k3-max" {
+			dryTo = r.To
 		}
 	}
-	if strings.Join(dryFastTo, ",") != "oczen/glm-4.6" {
-		t.Errorf("dry_run 未回将发生的变更（fast 备胎应为 oczen/glm-4.6）: %v", dryFastTo)
+	if strings.Join(dryTo, ",") != "oczen/glm-4.6" {
+		t.Errorf("dry_run 未回将发生的变更（custom 备胎应为 oczen/glm-4.6）: %v", dryTo)
 	}
 
 	after := readCfgBytes(t, path)
@@ -409,7 +428,7 @@ func TestSceneRoutingPreservesUnrelatedConfig(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	seedOtherEntries(t, a)
 	a.mu.Lock()
-	a.cfg.Compat.ModelMap["code"] = "traework/old-code" // 场景键旧值（应被覆盖）
+	a.cfg.Compat.ModelMap["custom"] = "traework/old-custom" // 场景键旧值（应被覆盖）
 	otherRuleTo := append([]string(nil), a.cfg.ModelFallback[1].To...)
 	a.mu.Unlock()
 	mux := panelMux(a)
@@ -433,8 +452,8 @@ func TestSceneRoutingPreservesUnrelatedConfig(t *testing.T) {
 	if strings.Join(oczenTo, ",") != strings.Join(otherRuleTo, ",") {
 		t.Errorf("非场景规则被改动：%v → %v", otherRuleTo, oczenTo)
 	}
-	if got := mm["code"]; got != "workbuddy/claude-sonnet-4.5" {
-		t.Errorf("场景键 code 未覆盖旧值：%q", got)
+	if got := mm["custom"]; got != "raccoon/sn-kimi-k3-max" {
+		t.Errorf("场景键 custom 未覆盖旧值：%q", got)
 	}
 }
 
@@ -456,7 +475,7 @@ func TestSceneRoutingMissingToIsRejected(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	mux := panelMux(a)
 	scenes := goodScenes()
-	scenes[1].To = nil
+	scenes[0].To = nil
 	path := cfgFilePath(a)
 	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
 	if w.Code != http.StatusBadRequest {
@@ -522,11 +541,11 @@ func TestSceneRoutingRejectsUnknownChannel(t *testing.T) {
 			return s
 		}},
 		{"to 渠道不存在", func(s []sceneSubmit) []sceneSubmit {
-			s[1].To = []string{"nosuchchannel/claude-sonnet-4.5"}
+			s[0].To = []string{"nosuchchannel/claude-sonnet-4.5"}
 			return s
 		}},
 		{"渠道名大小写拼错", func(s []sceneSubmit) []sceneSubmit {
-			s[2].From = "Racoon/sn-kimi-k3-max" // 真名是 raccoon
+			s[0].From = "Racoon/sn-kimi-k3-max" // 真名是 raccoon
 			return s
 		}},
 	}
@@ -577,7 +596,7 @@ func TestSceneRoutingAllowsUpstreamNamespace(t *testing.T) {
 			seedOtherEntries(t, a)
 			mux := panelMux(a)
 			scenes := goodScenes()
-			scenes[1].To = []string{tc.id}
+			scenes[0].To = []string{tc.id}
 			w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
 			if w.Code != http.StatusOK {
 				t.Fatalf("%q 属合法上游命名空间，应 200，实际 %d: %s", tc.id, w.Code, w.Body.String())
@@ -629,10 +648,10 @@ func TestSceneRoutingWarnsUnknownModel(t *testing.T) {
 		t.Error("警告场景应当照常落盘，config.json 未变化")
 	}
 	a.mu.Lock()
-	got := a.cfg.Compat.ModelMap["fast"]
+	got := a.cfg.Compat.ModelMap["custom"]
 	a.mu.Unlock()
-	if got != "workbuddy/deepseek-v4.1-flash" {
-		t.Errorf("警告场景未落盘内存态：model_map[fast]=%q", got)
+	if got == "" {
+		t.Errorf("警告场景未落盘内存态：model_map[custom]=%q", got)
 	}
 }
 
@@ -668,8 +687,8 @@ func TestSceneRoutingWarnsSameChannelFirstFallback(t *testing.T) {
 	mux := panelMux(a)
 
 	scenes := goodScenes()
-	// complex 的主模型是 raccoon/sn-kimi-k3-max，首个备胎也写 raccoon 的模型。
-	scenes[2].To = []string{"raccoon/sn-kimi-k3", "workbuddy/deepseek-v4.1-flash"}
+	// custom 的主模型是 raccoon/sn-kimi-k3-max，首个备胎也写 raccoon 的模型。
+	scenes[0].To = []string{"raccoon/sn-kimi-k3", "workbuddy/deepseek-v4.1-flash"}
 	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("同渠道首选备胎应只警告（200），实际 %d: %s", w.Code, w.Body.String())
@@ -696,8 +715,8 @@ func TestSceneRoutingNamespaceIsSameChannelForI7(t *testing.T) {
 	mux := panelMux(a)
 
 	scenes := goodScenes()
-	scenes[1].From = "cline-free/muse-spark"
-	scenes[1].To = []string{"cline/cline-free/muse-spark-pro"}
+	scenes[0].From = "cline-free/muse-spark"
+	scenes[0].To = []string{"cline/cline-free/muse-spark-pro"}
 	w := doReq(mux, "POST", "/api/config/scene_routing", sceneBody(t, scenes, nil), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("应 200，实际 %d: %s", w.Code, w.Body.String())
@@ -944,8 +963,8 @@ func TestSetCompatRejectsAliasInValue(t *testing.T) {
 	mux := panelMux(a)
 
 	cases := []struct{ name, body string }{
-		{"场景别名键指向别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"code":"workbuddy/fast"}}`},
-		{"裸别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"fast":"complex"}}`},
+		{"场景别名键指向别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"custom":"workbuddy/custom"}}`},
+		{"裸别名", `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"custom":"auto"}}`},
 	}
 	for _, tc := range cases {
 		w := doReq(mux, "POST", "/api/config/compat", tc.body, nil)
@@ -979,12 +998,11 @@ func TestSetCompatRejectsSceneMapMismatch(t *testing.T) {
 		t.Fatalf("建一致态失败 %d: %s", w.Code, w.Body.String())
 	}
 	a.mu.Lock()
-	cur := a.cfg.Compat.ModelMap["fast"]
+	cur := a.cfg.Compat.ModelMap["custom"]
 	a.mu.Unlock()
 
 	// 用旧端点把别名改到一个没有对应规则的值 ⇒ 必须拒。
-	bad := `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"fast":"raccoon/sn-kinji-other","code":"` +
-		a.cfg.Compat.ModelMap["code"] + `","complex":"` + a.cfg.Compat.ModelMap["complex"] + `"}}`
+	bad := `{"default_channel":"workbuddy","max_tokens_cap":32000,"model_map":{"custom":"raccoon/sn-kinji-other"}}`
 	w := doReq(mux, "POST", "/api/config/compat", bad, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("别名与链 From 分裂应 400，实际 %d: %s", w.Code, w.Body.String())
@@ -994,15 +1012,14 @@ func TestSetCompatRejectsSceneMapMismatch(t *testing.T) {
 	}
 	// 落盘不得被改动 ⇒ 回读别名仍是原值。
 	a.mu.Lock()
-	got := a.cfg.Compat.ModelMap["fast"]
+	got := a.cfg.Compat.ModelMap["custom"]
 	a.mu.Unlock()
 	if got != cur {
-		t.Errorf("被拒后 model_map[fast] 变成 %q（应仍为 %q）", got, cur)
+		t.Errorf("被拒后 model_map[custom] 变成 %q（应仍为 %q）", got, cur)
 	}
 
 	// 反向护栏：**原样提交**（别名与链一致）必须放行，否则「只改 default_channel」也会被误拦。
-	ok := `{"default_channel":"oczen","max_tokens_cap":32000,"model_map":{"fast":"` + cur +
-		`","code":"` + a.cfg.Compat.ModelMap["code"] + `","complex":"` + a.cfg.Compat.ModelMap["complex"] + `"}}`
+	ok := `{"default_channel":"oczen","max_tokens_cap":32000,"model_map":{"custom":"` + cur + `"}}`
 	if w := doReq(mux, "POST", "/api/config/compat", ok, nil); w.Code != http.StatusOK {
 		t.Errorf("别名与链一致时应放行，实际 %d: %s", w.Code, w.Body.String())
 	}

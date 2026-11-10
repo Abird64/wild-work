@@ -5,6 +5,10 @@
 >
 > **独立审核 Agent** 另读 `review.md`：本仓「什么算真问题、要什么证据、哪些不必报」的判据索引（按决议号定点回溯，不复述本文件）。
 >
+> 📍 **本机运行实例的运维手册**：`<运行目录>/AGENTS.md`（本机路径 `/home/abird/Workspace/Apps/wild-work/AGENTS.md`）——
+> 讲「这台机器上的实例怎么查/怎么部署/源码导航图（签到链行号地图）/已知坑」。
+> **改代码前读它**（能省掉大量 grep），但**纪律与决议以本文件 + `docs/` 为准**。
+>
 > **项目渊源**：3 个分离的 xxx2api 仓库 → workbuddy-wild v0.1.x（wails GUI）→ v0.2.x（+traework）
 > → v2.0.x（弃 wails，改系统托盘 daemon + Web UI）→ v2.1.x（+WorkBuddy 国际版）。
 > 当前 `master` 为 v2.8.x；v0.2.x 在 `legacy-wails` 分支（不再维护）。
@@ -47,7 +51,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R163）
+## 1. 决议项索引（R1–R166）
 
 **逐条摘要在 [`docs/决议索引.md`](docs/决议索引.md)；全文（证据链、反例、已知限制）在 [`docs/决议项.md`](docs/决议项.md)** —— 本文件不再保存 R 条目。
 
@@ -235,6 +239,15 @@ Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）；
 ⑤ **`go xxxSch.Run(sctx)`**（R34，漏了会静默不跑）；⑥ 补回归测试。
 > 无账号渠道（oczen / kilo）跳过 ②④，虚拟账号由 `main` 装配时注入。
 
+**模型别名只有两个（R165/R166）**：`auto`（自动选路——按「免费/余额优先 + 质价比」当场算出一个具体的
+`<channel>/<model>`，实际选择经 `X-Model-Origin` / `X-Model-Auto-Chosen` / `X-Model-Auto-Chain` 透出）
+与 `custom`（用户手写的「主模型 + 备胎链」）。旧三场景名 `fast` / `code` / `complex` 收编为
+**等价转发键**（都指向 `custom`），`/v1/models` 里标注「旧名（R165 收编为 custom，等价转发）」——
+**不删除**是为了不把写死旧名的客户端打成 400。`auto` 是**保留名**：判定取客户端原值、发生在
+`resolveAlias` **之前**，故配置里一条 `auto -> x` 会被忽略而不是静默架空整套选路；
+`app.SetSceneRouting` 也拒收该键（`scene_reserved_alias`）。别名的**降级**走 auto 决策的
+「全序」（`Decision.Order`，覆盖全部候选），`fallback_depth` 只约束响应头里展示的条数。
+
 **各渠道协议要点、凭据模型、已知限制与踩坑**见 [`docs/渠道接入备忘.md`](docs/渠道接入备忘.md)。
 
 ---
@@ -333,8 +346,8 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 关键不变量 + 构建发版（决议摘要已下沉到 docs/决议索引.md） |
-| [docs/决议索引.md](docs/决议索引.md) | R1–R163 **逐条摘要**（按编号/关键词定点 grep，勿整篇读） |
-| [docs/决议项.md](docs/决议项.md) | **R1–R163 决议全文**（证据链、反例、已知限制） |
+| [docs/决议索引.md](docs/决议索引.md) | R1–R166 **逐条摘要**（按编号/关键词定点 grep，勿整篇读） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R166 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

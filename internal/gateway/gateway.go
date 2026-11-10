@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wild-work/internal/auto"
 )
 
 // Config 兼容层配置。
@@ -58,6 +60,36 @@ type Gateway struct {
 	// maxBody 读写请求体的上限来源（装配层注入，见 Config.MaxInnerBody）。
 	// nil 时用 defaultMaxInnerBody。
 	maxBody func() int64
+
+	// autoMu 保护 autoResolve（自动选路解析器，R165）。nil = 未接入。
+	//
+	// 为什么挂在 Gateway 上而不是 Router 字段里：`SetCompat` 会用新字面量**整体替换**
+	// `g.router`（见该函数），任何塞进 Router 的字段都会在每次面板保存 compat 时被清空，
+	// 变成「保存一次兼容配置，自动选路就悄悄失效」这类极难定位的回归。
+	autoMu      sync.RWMutex
+	autoResolve func(req auto.Request) (chosen string, chain, order []string, ok bool)
+}
+
+// SetAutoResolver 注入自动选路解析器（R165；main 装配时传 app.AutoResolver()）。
+// 注入后兼容层的 `model:"auto"` 才会被就地解析成具体 `<channel>/<model>`。
+func (g *Gateway) SetAutoResolver(fn func(req auto.Request) (chosen string, chain, order []string, ok bool)) {
+	if g == nil {
+		return
+	}
+	g.autoMu.Lock()
+	g.autoResolve = fn
+	g.autoMu.Unlock()
+}
+
+// autoDecide 取当前解析器并执行一次决策（未注入 ⇒ ok=false）。
+func (g *Gateway) autoDecide(req auto.Request) (string, []string, []string, bool) {
+	g.autoMu.RLock()
+	fn := g.autoResolve
+	g.autoMu.RUnlock()
+	if fn == nil {
+		return "", nil, nil, false
+	}
+	return fn(req)
 }
 
 // New 构造兼容层。inner 为 nil 时返回 nil（调用方据此跳过兼容层，保持旧行为）。
@@ -237,8 +269,38 @@ func parseJSONBody(w http.ResponseWriter, r *http.Request, anthropicShape bool, 
 	return obj, true
 }
 
-// resolveModel 解析模型名，失败时按协议形状回错误。
+// resolveModel 解析模型名（无能力要求版本：常驻客户端传的普通模型名）。
 func (g *Gateway) resolveModel(w http.ResponseWriter, model string, anthropicShape bool) (string, bool) {
+	return g.resolveModelReq(w, model, anthropicShape, auto.Request{})
+}
+
+// resolveModelReq 解析模型名，失败时按协议形状回错误；`model:"auto"` 走自动选路（R165）。
+//
+// 自动选路必须在 Router 之前拦截：`auto` 既不是渠道名、也不该进 model_map
+// （否则用户配一条 `auto -> x` 就能把整套选路静默架空）。
+// 解析失败语义与内层 handler 对齐：未注入/未启用 ⇒ 400 invalid_model；
+// 已启用但无候选 ⇒ 400 invalid_model 并指向面板预览（兼容层没有 503 的语义位）。
+func (g *Gateway) resolveModelReq(w http.ResponseWriter, model string, anthropicShape bool, req auto.Request) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(model), auto.Alias) {
+		chosen, chain, _, ok := g.autoDecide(req)
+		if !ok {
+			if anthropicShape {
+				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
+					"model \"auto\" 未启用或当前没有可用候选：请在面板「自动选路」开启并预览候选剔除原因")
+			} else {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_model",
+					"model \"auto\" 未启用或当前没有可用候选：请在面板「自动选路」开启并预览候选剔除原因")
+			}
+			return "", false
+		}
+		w.Header().Set("X-Model-Origin", "auto")
+		w.Header().Set("X-Model-Auto-Chosen", chosen)
+		if len(chain) > 1 {
+			w.Header().Set("X-Model-Auto-Chain", strings.Join(chain, ","))
+		}
+		logf("auto: model=auto chosen=%s chain=%s", chosen, strings.Join(chain, ","))
+		return chosen, true
+	}
 	var resolved string
 	var rerr error
 	g.withRouter(func(rt *Router) {

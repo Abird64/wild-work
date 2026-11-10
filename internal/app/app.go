@@ -152,6 +152,10 @@ type App struct {
 	pricingFetched time.Time
 	pricingErr     string // 最近一次拉取错误
 	pricingBusy    bool   // 防并发刷新（启动刷新与面板触发可能重叠）
+
+	// autoEng 自动选路引擎（R165）：快照装配 + 决策缓存。
+	// 懒初始化（autoEngineOf），nil 时按需创建。
+	autoEng *autoEngine
 }
 
 // New 构建 App 并接管全局日志（写文件 + 环形缓冲）。

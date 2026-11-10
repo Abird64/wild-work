@@ -230,6 +230,10 @@ func itoa(v int64) string {
 // 这是 2026-10-18 用户实测定性（上游按账号下发活动资格）之后的核心判据。
 // 实测依据：同一个号在官方客户端里也没有该入口；本机 3 个账号里只有 1 个有资格，
 // 工具端与桌面端逐账号结果完全一致（见 checkin.go 头部）。
+//
+// 2026-11-10 增补：无资格是**终态**（no_eligibility，不可重试）——重试到窗口结束
+// 也不会变，继续每分钟打上游纯属噪音（且违反「严禁批量探测上游」纪律）。
+// 状态位与文案必须同时对：状态决定调度器停不停，文案决定用户看没看懂。
 func TestNoEligibilityMessage(t *testing.T) {
 	withCheckinServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != EpCampaigns {
@@ -246,8 +250,11 @@ func TestNoEligibilityMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkin: %v", err)
 	}
-	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+	if rep.Status != provider.CheckinNoEligibility {
+		t.Fatalf("report = %+v, want no_eligibility（无资格是终态，不该再重试）", rep)
+	}
+	if rep.Status.Retryable() {
+		t.Error("no_eligibility 不得可重试：否则 10:00–12:00 每分钟打一次上游")
 	}
 	for _, want := range []string{"无积分领取活动资格", "不是本工具的问题"} {
 		if !strings.Contains(rep.Msg, want) {
@@ -257,6 +264,29 @@ func TestNoEligibilityMessage(t *testing.T) {
 	// 不得再说成「上游未下发可领取活动」那种含糊表述（历史误判的措辞）
 	if strings.Contains(rep.Msg, "上游未下发可领取活动") {
 		t.Errorf("无资格文案不得用含糊措辞「上游未下发可领取活动」：%s", rep.Msg)
+	}
+}
+
+// TestEligibilityWindowStaysRetryable 反向锁死：「有资格但窗口不合」必须**保持可重试**，
+// 不能被无资格终态误伤——该等上游刷新/到点，窗口内继续重试才对。
+func TestEligibilityWindowStaysRetryable(t *testing.T) {
+	ended, _, _ := windowsAroundNow()
+	withCheckinServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != EpCampaigns {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Write([]byte(`{"showCampaign":true,"claimable":false,"campaigns":[
+		  {"campaignId":"old","actionType":"CLAIM_BENEFIT",
+		   "startAt":` + itoa(ended-3600) + `,"endAt":` + itoa(ended) + `,"claimStatus":"CLAIMED"}]}`))
+	})
+
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
+		t.Fatalf("report = %+v, want no_campaign (retryable)：有资格的账号不能被判成终态", rep)
 	}
 }
 

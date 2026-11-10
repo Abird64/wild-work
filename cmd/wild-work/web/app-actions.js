@@ -24,10 +24,13 @@ const CHECKIN_FAIL_RE = /失败|http \d{3}|error|无法解析|parse|未知状态
 const CHECKIN_NO_ELIGIBILITY_RE = /无积分领取活动资格|无领取资格/;
 function checkinToast(r) {
   const msg = r.msg || "";
+  // 无资格判据放在最前：2026-11-10 起它是**终态**（ok=true / retryable=false），
+  // 但终态 ≠ 领到积分，所以绝不能落到「签到成功」那一档；反之若某渠道给出
+  // ok=false 的无资格（历史数据），也不该被兜底说成「暂未领到」。
+  if (CHECKIN_NO_ELIGIBILITY_RE.test(msg)) return `无领取资格：${msg}`;
   if (!r.ok) return `签到：${friendlyCheckinMsg(msg)}`;
   if (/^今日已领取/.test(msg)) return `今日已领过：${msg}（剩余 ${r.remain}）`;
   // 注意「领取失败 http 400」里也可能带数字，故失败判据必须先于「含 +N」判据。
-  if (CHECKIN_NO_ELIGIBILITY_RE.test(msg)) return `无领取资格：${msg}`;
   if (CHECKIN_FAIL_RE.test(msg)) return `签到失败：${friendlyCheckinMsg(msg)}`;
   if (/^签到成功/.test(msg) || /\+-?\d+/.test(msg)) return `签到成功：${msg}（剩余 ${r.remain}）`;
   return `暂未领到：${msg}（剩余 ${r.remain}）`;
@@ -35,9 +38,8 @@ function checkinToast(r) {
 async function checkin(uid) {
   try {
     const r = await api("/api/account/checkin", { uid });
-    // 无资格优先于「可重试」：该状态 retryable 仍为 true（上游可能在当天补发资格，
-    // 窗口内重试是免费的），但对**当前**这个账号说「会自动重试」会让人白等，
-    // 故这里明说「无需重试」并点出这不是工具故障。
+    // 无资格优先于「可重试」：该状态 2026-11-10 起是**终态**（retryable=false，
+    // 当天不再自动重试），但对用户仍要明说「这不是工具故障、也不会自动补发」。
     if (CHECKIN_NO_ELIGIBILITY_RE.test(r.msg || "")) {
       toast(`无领取资格：${r.msg}`);
     } else if (!r.ok && r.retryable) {
@@ -92,11 +94,17 @@ async function checkinAll() {
   try {
     const r = await api("/api/account/checkin_all", {});
     detailCache = {}; // 批量签到改变余额，全部明细缓存作废
-    const ok = (r.results || []).filter((x) => x.ok).length;
-    const pending = (r.results || []).filter((x) => !x.ok && x.retryable).length;
+    const results = r.results || [];
+    const ok = results.filter((x) => x.ok).length;
+    // 「无资格」是终态（2026-11-10 起 ok=true / retryable=false）：既不是「签到成功」，
+    // 也不会再自动重试 ⇒ 必须从「成功」里剔出来单独报，否则等于说它领到了。
+    const noElig = results.filter((x) => CHECKIN_NO_ELIGIBILITY_RE.test(x.msg || ""));
+    const okReal = ok - noElig.length;
+    const pending = results.filter((x) => !x.ok && x.retryable).length;
     const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
-    const total = (r.results || []).length + skip;
-    const parts = [skip ? `成功 ${ok} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${ok} / 共 ${total}`];
+    const total = results.length + skip;
+    const parts = [skip ? `成功 ${okReal} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${okReal} / 共 ${total}`];
+    if (noElig.length) parts.push(`${noElig.length} 个无领取资格（该账号无此活动资格，不会自动重试）`);
     if (pending) parts.push(`${pending} 个未领到将在窗口内自动重试`);
     toast(`批量签到完成：${parts.map(friendlyCheckinMsg).join("；")}`);
     loadState();

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/provider"
 )
 
@@ -42,7 +43,9 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model := asString(body["model"])
-	resolved, ok := g.resolveModel(w, model, false)
+	// 能力要求按请求体现取（tools / 图像 / 推理 / max_tokens）：`model:"auto"` 时
+	// 打分引擎靠这三项做硬门，探测口径与内层共用 auto.RequestFromMap，不会两套判据。
+	resolved, ok := g.resolveModelReq(w, model, false, auto.RequestFromMap(body))
 	if !ok {
 		return
 	}

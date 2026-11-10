@@ -68,6 +68,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 三场景原子端点（SD-6 唯一写入口）：三场景别名 + 三条降级链 + compat 三项一次落盘。
 	mux.HandleFunc("POST /api/config/scene_routing", a.apiConfigSceneRouting)
 	mux.HandleFunc("POST /api/config/compat", a.apiConfigCompat)
+	// 自动选路（R165）：预览（只读排名）+ 配置保存（原子写 + 回滚）。
+	mux.HandleFunc("POST /api/auto/preview", a.apiAutoPreview)
+	mux.HandleFunc("GET /api/auto/preview", a.apiAutoPreview)
+	mux.HandleFunc("POST /api/config/auto", a.apiConfigAuto)
 	mux.HandleFunc("POST /api/config/proxy", a.apiConfigProxy)
 	mux.HandleFunc("POST /api/config/body_log", a.apiConfigBodyLog)
 	mux.HandleFunc("POST /api/config/oczen_test", a.apiConfigOczenTest)

@@ -13,11 +13,21 @@
 
 // SCENE_ALIASES 场景别名与中文名的单一来源（SD-9：只做三个）。
 // 顺序即 UI 展示顺序，也是提交时的固定顺序（服务端按 sceneAliases 固定顺序生成，幂等）。
+// R165：三场景收编为**一个自定义场景**。另半个名额给了自动选路（AUTO_ALIAS），
+// 它不是 model_map 里的别名（服务端按保留名拦截），所以不在这张表里。
 const SCENE_ALIASES = [
-  { alias: "fast",    label: "快速", desc: "低延迟优先：日常问答、轻量改写" },
-  { alias: "code",    label: "代码", desc: "工具调用是硬条件：需要 tools 能力 + 足够上下文" },
-  { alias: "complex", label: "复杂", desc: "深度推理与长上下文优先：方案、长文分析" },
+  { alias: "custom", label: "自定义", desc: "固定链：主模型 + 备胎顺序，全部由你手写，行为可预测" },
 ];
+
+// AUTO_ALIAS 自动选路的保留名：客户端 model 写它即触发打分引擎（internal/auto）。
+const AUTO_ALIAS = "auto";
+
+// SCENE_RETIRED_ALIASES 已退役但仍可能活在配置里的旧别名（服务端 I4 也把它们的名字算作别名）。
+// 前端拿它做「模型名写成别名」的预检与文案，避免用户写 workbuddy/fast 这种永不触发的形态。
+const SCENE_RETIRED_ALIASES = ["fast", "code", "complex"];
+
+// SCENE_ALIAS_NAMES 所有「会作为路由别名生效」的名字（= 可编辑 ∪ 退役 ∪ auto），I4 用它。
+const SCENE_ALIAS_NAMES = SCENE_ALIASES.map((x) => x.alias).concat(SCENE_RETIRED_ALIASES, [AUTO_ALIAS]);
 
 // SCENE_CANDIDATES 推荐候选池（来源 = SR-002 的 scene-candidates.json）。
 // ⚠️ 这里只搬 id 与证据等级：**活值（倍率/余额/实测速度）一律现取 lastFees/stats**，
@@ -315,7 +325,7 @@ function sceneProblems(rules) {
     const from = String(r.from || "").trim();
     if (!from) {
       out.push({ alias, level: "error", msg: "主模型不能为空" });
-    } else if (SCENE_ALIASES.some((x) => x.alias === from)) {
+    } else if (SCENE_ALIAS_NAMES.includes(from)) {
       // 别名判定**必须**排在形状判定之前：别名天然不含 `/`，先判形状会把
       // 「你写了别名」误报成「格式不对」，用户照着格式提示改还是错。
       out.push({ alias, level: "error", msg: `主模型不能写成别名 ${from}——要写 渠道/模型 全路径（写别名会让整条链永不触发且不报错）` });
@@ -333,7 +343,7 @@ function sceneProblems(rules) {
       if (!tv) continue;
       if (tv === from) {
         out.push({ alias, level: "error", msg: `备胎不能是它自己的主模型（自环）：${tv}` });
-      } else if (SCENE_ALIASES.some((x) => x.alias === tv)) {
+      } else if (SCENE_ALIAS_NAMES.includes(tv)) {
         out.push({ alias, level: "error", msg: `备胎不能写成别名 ${tv}——要写 渠道/模型 全路径` });
       } else if (!/^[^/]+\/.+/.test(tv)) {
         out.push({ alias, level: "error", msg: `备胎 ${tv} 需为 渠道/模型 形式` });
@@ -517,6 +527,26 @@ let sceneCandOverride = null;
 // sceneCandData 读当前生效的候选池数据（生产 = SCENE_CANDIDATES 常量）。
 function sceneCandData() { return sceneCandOverride || SCENE_CANDIDATES; }
 
+// R165 收编：候选池原本按 fast/code/complex 分三份。收编后只剩 custom 一个可编辑别名，
+// 三份池**合并去重**成 custom 的一份（同 id 只留第一条）——直接删掉两份等于丢掉 SR-002 的
+// 取样成果，合并则让推荐列表仍覆盖全部曾考察过的模型。
+// 纯数据折叠，不动任何 id / report_evidence / routed_out（证据等级是展示口径，不得篡改）。
+(function foldSceneCandidates() {
+  if (!SCENE_CANDIDATES || !Array.isArray(SCENE_CANDIDATES.scenes)) return;
+  const seen = new Set();
+  const merged = [];
+  for (const sc of SCENE_CANDIDATES.scenes) {
+    for (const c of sc.candidates || []) {
+      if (!c || !c.id || seen.has(c.id)) continue;
+      seen.add(c.id);
+      merged.push(c);
+    }
+  }
+  SCENE_CANDIDATES.scenes = [{ alias: "custom", candidates: merged }];
+  SCENE_CANDIDATES._meta = Object.assign({}, SCENE_CANDIDATES._meta || {},
+    { folded_from: "fast/code/complex（R165 收编为一场景，池合并去重）" });
+})();
+
 // sceneEvidenceOf 取某模型在某场景的证据等级快照（只读，绝不参与排序）。
 // 返回 null 表示该模型不在 SR-002 候选池里（例如用户从搜索框临时挑的）。
 function sceneEvidenceOf(alias, id) {
@@ -570,6 +600,10 @@ function renderSceneRec() {
   const panel = $("sceneRecPanel");
   if (panel) panel.classList.toggle("hidden", !sceneRecOpen);
   if (!sceneRecOpen) { box.innerHTML = ""; return; }
+
+  // tab 兜底：场景别名收编后旧 tab 值（fast/code/complex）不再有对应按钮，
+  // 不兜底会拿一个不存在的别名去排序 ⇒ 出现「没有高亮 tab 但列表里有候选」的怪态。
+  if (!SCENE_ALIASES.some((x) => x.alias === sceneRecTab)) sceneRecTab = SCENE_ALIASES[0].alias;
 
   // tab 高亮
   const tabs = $("sceneRecTabs");
@@ -693,6 +727,298 @@ function renderSceneWarn() {
     return `${lab}：${p.msg}`;
   });
   el.textContent = infos.length ? infos.join("　|　") : "";
+}
+
+// ---------------------------------------------------------------------------
+// 自动选路卡片（R165）
+// ---------------------------------------------------------------------------
+// 交互纪律与场景卡片一致：**唯一真相源是服务端**。autoDraft 只是编辑态，保存后一律用响应里的
+// config 覆盖（不信前端算的），保证「面板显示 A、运行时用 B」不可能发生。
+// 三个数据来源：
+//   state.auto            —— GET /api/state 里的当前生效配置（打开设置时深拷贝成编辑态）
+//   POST /api/auto/preview —— 当场算一遍，回决策 + 每个候选的被剔除原因（不落盘）
+//   POST /api/config/auto  —— 唯一写入口（服务端 a.mu 内一次 config.Save，失败回滚）
+let autoDraft = null;        // 编辑态
+let autoPreviewData = null;  // 最近一次预览结果（null = 还没预览过）
+let autoPreviewBusy = false;
+
+// AUTO_WEIGHT_META 权重滑块的展示元数据。key 路径与 Go 端 Weights 的 json 字段一一对应
+// （channel.credit … model.cache）；新增维度必须两边同时改，否则滑块会静默失效。
+const AUTO_WEIGHT_META = [
+  { path: ["channel", "credit"],    label: "渠道余额",   tip: "渠道剩余积分/额度越多分越高（诉求①：优先用积分最多的）" },
+  { path: ["channel", "health"],    label: "渠道健康",   tip: "健康账号占比：禁用/冷却/掉登录的账号会拉低这个维度" },
+  { path: ["channel", "expiry"],    label: "不过期",     tip: "临期额度越多扣分（临期不用就作废，优先消耗）" },
+  { path: ["channel", "stability"], label: "稳定",       tip: "近期失败率低分高" },
+  { path: ["channel", "cost"],      label: "渠道便宜",   tip: "渠道整体费率低分高" },
+  { path: ["model", "value"],       label: "模型质价比", tip: "诉求②：能力÷价格。免费档在这里拿满分" },
+  { path: ["model", "perf"],        label: "实测速度",   tip: "本机实测 TTFB 与 tok/s；样本不足时取中性值" },
+  { path: ["model", "cap"],         label: "能力覆盖",   tip: "工具/图片/推理/上下文的覆盖度" },
+  { path: ["model", "mature"],      label: "成熟度",     tip: "渠道接入成熟度（有实测数据、非冷门模型）" },
+  { path: ["model", "cache"],       label: "缓存命中",   tip: "上游上报过缓存命中且命中率高" },
+];
+
+// autoWeightOf 取权重值（缺失按 0；后端 normalized 会把全零维度退回默认）。
+function autoWeightOf(cfg, path) {
+  const w = (cfg && cfg.weights) || {};
+  const sec = w[path[0]] || {};
+  const v = Number(sec[path[1]]);
+  return Number.isFinite(v) ? v : 0;
+}
+
+// autoSetWeight 写回权重值（编辑态可能还是 null，先在本地补齐结构）。
+function autoSetWeight(path, val) {
+  if (!autoDraft) return;
+  autoDraft.weights = autoDraft.weights || {};
+  autoDraft.weights[path[0]] = autoDraft.weights[path[0]] || {};
+  autoDraft.weights[path[0]][path[1]] = Math.max(0, Number(val) || 0);
+}
+
+// autoNorm 把服务端配置补成前端可渲染的形状（prefer_free 是 *bool，可能缺省）。
+function autoNorm(cfg) {
+  const c = Object.assign({}, cfg || {});
+  c.enabled = !!c.enabled;
+  if (c.prefer_free === undefined || c.prefer_free === null) c.prefer_free = true;
+  c.unknown_rate_policy = c.unknown_rate_policy === "deprioritize" ? "deprioritize" : "allow";
+  c.min_perf_samples = Number(c.min_perf_samples) > 0 ? Number(c.min_perf_samples) : 10;
+  c.fallback_depth = Number(c.fallback_depth) > 0 ? Number(c.fallback_depth) : 3;
+  c.ttl_seconds = Number(c.ttl_seconds) > 0 ? Number(c.ttl_seconds) : 60;
+  c.excluded_channels = Array.isArray(c.excluded_channels) ? c.excluded_channels.slice() : [];
+  const dw = { channel: { credit: 0.30, health: 0.25, expiry: 0.20, stability: 0.15, cost: 0.10 },
+               model:   { value: 0.30, perf: 0.25, cap: 0.20, mature: 0.15, cache: 0.10 } };
+  c.weights = c.weights || {};
+  c.weights.channel = Object.assign({}, dw.channel, c.weights.channel || {});
+  c.weights.model = Object.assign({}, dw.model, c.weights.model || {});
+  return c;
+}
+
+// autoSliderHtml 单个权重滑块（0~1，步进 0.05）。归一化在服务端做，故这里只显示"相对权重"。
+function autoSliderHtml(cfg, meta) {
+  const v = autoWeightOf(cfg, meta.path);
+  const k = meta.path.join(".");
+  return `<div class="auto-w" title="${esc(meta.tip)}">
+      <span class="auto-w-lab">${esc(meta.label)}</span>
+      <input type="range" min="0" max="1" step="0.05" value="${v}" data-auto-w="${k}">
+      <span class="auto-w-val" id="autoWv_${k.replace(/\./g, "_")}">${v.toFixed(2)}</span>
+    </div>`;
+}
+
+// renderAutoCard 渲染自动选路卡片。事件全部走 #autoCard 上的委托（每轮 innerHTML 重建不重挂）。
+function renderAutoCard() {
+  const box = $("autoCard");
+  if (!box) return;
+  if (!autoDraft) autoDraft = autoNorm((state && state.auto) || {});
+  const c = autoDraft;
+
+  const chNames = ((state && state.compat && state.compat.channels) || []);
+  const excl = new Set(c.excluded_channels);
+  const exclHtml = chNames.length
+    ? chNames.map((n) => `<label class="auto-excl"><input type="checkbox" data-auto-excl="${esc(n)}"${excl.has(n) ? " checked" : ""}>${esc(n)}</label>`).join("")
+    : '<span class="hint">（渠道列表未加载）</span>';
+
+  box.innerHTML = `<div class="fb-rule-card scene-card auto-card">
+    <div class="fb-rule-head">
+      <span class="fb-rule-badge">${esc(AUTO_ALIAS)}</span>
+      <span class="scene-label">自动选路</span>
+      <label class="auto-toggle"><input type="checkbox" id="autoEnabled"${c.enabled ? " checked" : ""}>启用</label>
+      <span class="hint" style="margin:0">客户端 model 写 <code>auto</code> ⇒ 按下面这些规则当场挑一个具体模型</span>
+    </div>
+    <div class="fb-rule-body">
+      <div class="row" style="margin-top:0;flex-wrap:wrap;gap:12px">
+        <label class="auto-opt"><input type="checkbox" id="autoPreferFree"${c.prefer_free ? " checked" : ""}>免费优先</label>
+        <label class="auto-opt">未知费率
+          <select class="input" id="autoUnknownRate" style="width:auto;display:inline-block">
+            <option value="allow"${c.unknown_rate_policy === "allow" ? " selected" : ""}>照常参与（可能花掉未知额度）</option>
+            <option value="deprioritize"${c.unknown_rate_policy === "deprioritize" ? " selected" : ""}>降权（排到最后）</option>
+          </select>
+        </label>
+        <label class="auto-opt">备胎深度 <input class="input" type="number" min="1" max="8" id="autoDepth" value="${c.fallback_depth}" style="width:70px"></label>
+        <label class="auto-opt" title="决策缓存时长：同一能力需求在这个窗口内复用上次决策，避免每条请求都重算">缓存 <input class="input" type="number" min="0" max="600" id="autoTTL" value="${c.ttl_seconds}" style="width:70px"> 秒</label>
+        <label class="auto-opt" title="样本少于该值时「实测速度」按中性值处理，防止 1 次请求的偶发快就霸榜">性能样本 ≥ <input class="input" type="number" min="1" max="200" id="autoMinPerf" value="${c.min_perf_samples}" style="width:70px"></label>
+      </div>
+      <div class="auto-weights">${AUTO_WEIGHT_META.map((m) => autoSliderHtml(c, m)).join("")}</div>
+      <div class="row" style="margin-top:6px;align-items:flex-start">
+        <label class="lbl scene-lbl" style="margin-top:2px">排除渠道</label>
+        <div class="grow auto-excl-box">${exclHtml}</div>
+      </div>
+      <div class="row fb-foot-actions" style="margin-top:8px">
+        <label class="auto-opt" title="勾上按「需要工具调用」预览：这是最容易把免费渠道（无 tools）挡掉的一档，能看出免费优先要让位给能力硬门"><input type="checkbox" id="autoPreviewTools" checked>需要工具</label>
+        <button class="btn small" id="btnAutoPreview" title="按当前配置当场算一遍并列出每个候选被剔除的原因（不写盘）">预览决策</button>
+        <button class="btn small primary" id="btnAutoSave" title="保存自动选路配置（服务端一次原子写入，失败回滚）">保存自动选路</button>
+        <span class="hint" id="autoHint" style="margin:0"></span>
+      </div>
+      <div id="autoPreviewBox"></div>
+    </div>
+  </div>`;
+
+  renderAutoPreview();
+}
+
+// renderAutoPreview 渲染最近一次预览结果：首选 + 备胎链 + 通过硬门的候选表 + 被剔除表。
+// **被剔除的必须展示原因**：自动选路最容易被误判成"抽风"，只有把 `no_tools`/`terminal_channel`
+// 这类原因摊开，用户才知道该去修什么（面板的价值就在这一层）。
+function renderAutoPreview() {
+  const box = $("autoPreviewBox");
+  if (!box) return;
+  const d = autoPreviewData;
+  if (!d) { box.innerHTML = '<div class="hint">还没预览。点「预览决策」看当前会选中谁、以及为什么。</div>'; return; }
+  const dec = d.decision || {};
+  const chosen = dec.chosen || "";
+  const chain = dec.chain || [];
+  // order 是降级全序（R166）：展示链只留 fallback_depth 条给响应头读，
+  // 真正的降级走这条全序。老后端没有这个字段时退回 chain，渲染不炸。
+  const order = (dec.order && dec.order.length) ? dec.order : chain;
+  const cands = dec.candidates || [];
+  const rej = dec.rejected || [];
+  const chans = d.channels || [];
+
+  const chainHtml = chain.length
+    ? chain.map((x, i) => `<span class="fb-to-chip" title="第 ${i + 1} 顺位">${i === 0 ? "" : `<span class="chip-idx">${i + 1}</span>`}<span class="chip-txt">${esc(x)}</span></span>`).join("")
+    : '<span class="hint">（无候选）</span>';
+
+  const orderHtml = order.length > chain.length
+    ? `<details class="auto-rej"><summary>降级全序 ${order.length} 条（额度用完 / 限流时按这个顺序换，不受展示链 ${chain.length} 条的限制）</summary>
+    <div class="fb-chips" style="margin-top:4px">${order.map((x, i) => `<span class="fb-to-chip" title="降级顺位 ${i + 1}"><span class="chip-idx">${i + 1}</span><span class="chip-txt">${esc(x)}</span></span>`).join("")}</div></details>`
+    : "";
+
+  const candHtml = cands.length ? `<table class="auto-tbl"><thead><tr><th>候选</th><th>档</th><th>总分</th><th>渠道</th><th>模型</th></tr></thead><tbody>${
+    cands.map((c) => `<tr${c.public === chosen ? ' class="is-chosen"' : ""}>
+      <td class="mono">${esc(c.public)}</td>
+      <td><span class="auto-tier auto-tier-${esc(c.tier)}">${esc(autoTierLabel(c.tier))}</span></td>
+      <td>${(Number(c.score) || 0).toFixed(2)}</td>
+      <td>${(Number(c.channel_score) || 0).toFixed(2)}</td>
+      <td>${(Number(c.model_score) || 0).toFixed(2)}</td>
+    </tr>`).join("")}</tbody></table>` : "";
+
+  const rejHtml = rej.length ? `<details class="auto-rej"><summary>被剔除 ${rej.length} 个（点开看原因）</summary>
+    <table class="auto-tbl"><thead><tr><th>候选</th><th>原因</th></tr></thead><tbody>${
+    rej.map((r) => `<tr><td class="mono">${esc(r.public)}</td><td><code>${esc(r.code)}</code> ${esc(r.detail || "")}</td></tr>`).join("")
+    }</tbody></table></details>` : "";
+
+  const chanHtml = chans.length ? `<details class="auto-rej"><summary>渠道快照 ${chans.length} 个（余额/健康/是否下场）</summary>
+    <table class="auto-tbl"><thead><tr><th>渠道</th><th>账号</th><th>余额</th><th>临期</th><th>状态</th></tr></thead><tbody>${
+    chans.map((ch) => `<tr><td>${esc(ch.name)}</td>
+      <td>${ch.accounts_na ? "—" : `${ch.healthy_accounts}/${ch.total_accounts}`}</td>
+      <td>${ch.credits_na ? "—" : esc(String(ch.credits))}</td>
+      <td>${ch.credits_na ? "—" : esc(String(ch.expiring_credits))}</td>
+      <td>${ch.terminal ? `<span class="auto-tier auto-tier-unpriced">不可用</span> ${esc(ch.terminal_reason || "")}` : "可选"}</td>
+    </tr>`).join("")}</tbody></table></details>` : "";
+
+  box.innerHTML = `<div class="auto-dec">
+      <div class="auto-dec-head">当前会选中：<b class="mono">${esc(chosen || "（无）")}</b>
+        <span class="hint" style="margin-left:8px">${esc(dec.reason || "")}</span></div>
+      <div class="fb-chips" style="margin-top:4px">${chainHtml}</div>
+      ${orderHtml}
+      ${candHtml}${rejHtml}${chanHtml}
+      <div class="hint" style="margin-top:4px">快照时间 ${esc(d.at || "")}${d.enabled === false ? "　|　自动选路当前<b>已关闭</b>（客户端写 auto 会拿到 400）" : ""}</div>
+    </div>`;
+}
+
+// autoTierLabel 档位中文名（与 internal/auto 的 TierFree/Priced/Unpriced 对齐）。
+function autoTierLabel(t) {
+  return t === "free" ? "免费" : t === "priced" ? "已定价" : t === "unpriced" ? "费率未知" : String(t || "");
+}
+
+// autoReadDraft 从 DOM 收集编辑态（滑块/开关/数字框都可能是用户刚改的，不能只看 autoDraft）。
+function autoReadDraft() {
+  const box = $("autoCard");
+  if (!box || !autoDraft) return autoDraft;
+  const en = $("autoEnabled"); if (en) autoDraft.enabled = en.checked;
+  const pf = $("autoPreferFree"); if (pf) autoDraft.prefer_free = pf.checked;
+  const ur = $("autoUnknownRate"); if (ur) autoDraft.unknown_rate_policy = ur.value;
+  const dep = $("autoDepth"); if (dep) autoDraft.fallback_depth = Math.max(1, Number(dep.value) || 1);
+  const ttl = $("autoTTL"); if (ttl) autoDraft.ttl_seconds = Math.max(0, Number(ttl.value) || 0);
+  const mp = $("autoMinPerf"); if (mp) autoDraft.min_perf_samples = Math.max(1, Number(mp.value) || 1);
+  const excl = [];
+  box.querySelectorAll("[data-auto-excl]").forEach((el) => { if (el.checked) excl.push(el.getAttribute("data-auto-excl")); });
+  autoDraft.excluded_channels = excl;
+  box.querySelectorAll("[data-auto-w]").forEach((el) => {
+    autoSetWeight(String(el.getAttribute("data-auto-w")).split("."), el.value);
+  });
+  // 权重全零 ⇒ 服务端会退回默认权重。这里显式提示，避免用户以为"全拖到 0 = 全都不考虑"。
+  const sum = Object.values(autoDraft.weights.channel).reduce((a, b) => a + Number(b || 0), 0)
+            + Object.values(autoDraft.weights.model).reduce((a, b) => a + Number(b || 0), 0);
+  const hint = $("autoHint");
+  if (hint) hint.textContent = sum <= 0 ? "⚠ 权重全为 0：服务端会按默认权重打分" : "";
+  return autoDraft;
+}
+
+// autoPreview 调 POST /api/auto/preview（带一组可调的能力需求，模拟"需要工具调用"的请求）。
+// 为什么固定传 tools=true：这是最容易把免费渠道（oczen 无工具）挡掉的一档，
+// 预览里能立刻看到"免费优先"并不是无条件的——它必须让位给能力硬门。
+async function autoPreview() {
+  if (autoPreviewBusy) return;
+  autoPreviewBusy = true;
+  const btn = $("btnAutoPreview");
+  if (btn) { btn.disabled = true; btn.textContent = "计算中…"; }
+  try {
+    const cfg = autoReadDraft();
+    const toolsEl = $("autoPreviewTools");
+    const wantTools = toolsEl ? !!toolsEl.checked : true;
+    const res = await api("/api/auto/preview", { tools: wantTools, images: false, reasoning: false, max_tokens: 0 });
+    autoPreviewData = res;
+    // 服务端配置才是权威：预览会带回它当前实际用的 config ⇒ 顺手对齐编辑态（只对齐非 UI 字段）
+    if (res && res.config) {
+      const srv = autoNorm(res.config);
+      autoDraft.enabled = srv.enabled;
+      autoDraft.unknown_rate_policy = srv.unknown_rate_policy;
+      autoDraft.fallback_depth = srv.fallback_depth;
+      autoDraft.ttl_seconds = srv.ttl_seconds;
+      autoDraft.min_perf_samples = srv.min_perf_samples;
+    }
+    if (cfg) { /* 编辑态保留用户改动，不覆盖 */ }
+    renderAutoPreview();
+  } catch (e) {
+    const box = $("autoPreviewBox");
+    if (box) box.innerHTML = `<div class="hint" style="color:var(--danger)">预览失败：${esc(e.message)}</div>`;
+  } finally {
+    autoPreviewBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = "预览决策"; }
+  }
+}
+
+// saveAutoConfig 唯一写入口：POST /api/config/auto。成功后用服务端返回的 config 覆盖编辑态与 state。
+async function saveAutoConfig() {
+  const cfg = autoReadDraft();
+  const btn = $("btnAutoSave");
+  if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+  try {
+    const res = await api("/api/config/auto", cfg);
+    const srv = autoNorm((res && res.config) || cfg);
+    autoDraft = srv;
+    if (state) state.auto = (res && res.config) || cfg;
+    renderAutoCard();
+    const hint = $("autoHint");
+    if (hint) hint.textContent = "已保存";
+  } catch (e) {
+    const hint = $("autoHint");
+    if (hint) hint.textContent = "保存失败：" + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "保存自动选路"; }
+  }
+}
+
+// attachAutoCard 挂事件委托（只挂一次；卡片内容每轮重建也不影响）。
+function attachAutoCard() {
+  const box = $("autoCard");
+  if (!box || box.dataset.bound === "1") return;
+  box.dataset.bound = "1";
+  box.addEventListener("input", (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    if (t.matches("[data-auto-w]")) {
+      const k = String(t.getAttribute("data-auto-w")).replace(/\./g, "_");
+      const lab = $("autoWv_" + k);
+      if (lab) lab.textContent = (Number(t.value) || 0).toFixed(2);
+      autoReadDraft();
+    }
+  });
+  box.addEventListener("change", () => { autoReadDraft(); });
+  box.addEventListener("click", (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    if (t.id === "btnAutoPreview") { autoPreview(); return; }
+    if (t.id === "btnAutoSave") { saveAutoConfig(); return; }
+  });
 }
 
 // attachScenePickers 给卡片里的输入框挂模糊搜索下拉（每轮 innerHTML 重建后重挂）。
@@ -862,9 +1188,14 @@ function verifySceneReadback(res, expected) {
 async function openSceneEditor() {
   sceneRules = sceneNormalize(state && state.compat, state && state.model_fallback);
   renderSceneCards();
+  // 自动选路卡片（R165）：编辑态从服务端 state.auto 深拷贝，预览结果清空（不显示上次的旧决策）
+  autoDraft = autoNorm((state && state.auto) || {});
+  autoPreviewData = null;
+  renderAutoCard();
+  attachAutoCard();
   // 推荐列表默认收起：不看就不算（SD-7 只承诺"每次展开重算"，不承诺"一直开着"）
   sceneRecOpen = false;
-  sceneRecTab = "fast";
+  sceneRecTab = SCENE_ALIASES[0].alias;
   const recBtn = $("btnSceneRec");
   if (recBtn) recBtn.textContent = "展开推荐候选";
   renderSceneRec();

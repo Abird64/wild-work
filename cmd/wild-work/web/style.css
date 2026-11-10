@@ -1932,3 +1932,29 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .time-editor { display: inline-flex; align-items: center; gap: 6px; }
 .time-editor[hidden] { display: none; }
 .time-pick { width: 116px; padding: 5px 8px; font-size: 13px; }
+
+/* ---------- 自动选路卡片（R165）----------
+   与场景卡片同壳（.scene-card / .fb-rule-card），只补自己的三类零件：
+   ① 一行式开关（启用 / 免费优先）② 权重滑块（10 条，两列排）③ 预览结果表。 */
+.auto-card .fb-rule-body { padding-top: 8px; }
+.auto-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--fg); cursor: pointer; }
+.auto-opt { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.auto-weights { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 2px 16px; margin-top: 8px; }
+.auto-w { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.auto-w-lab { width: 72px; color: var(--muted); flex: none; }
+.auto-w input[type="range"] { flex: 1 1 auto; min-width: 60px; accent-color: var(--primary); }
+.auto-w-val { width: 34px; text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+.auto-excl-box { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.auto-excl { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); }
+.auto-dec { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.auto-dec-head { font-size: 12px; color: var(--fg); }
+.auto-tbl { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.auto-tbl th { text-align: left; font-weight: 500; color: var(--muted); padding: 2px 6px; border-bottom: 1px solid var(--line); }
+.auto-tbl td { padding: 2px 6px; border-bottom: 1px solid var(--line); color: var(--fg); }
+.auto-tbl tr.is-chosen td { background: var(--primary-weak, rgba(64,128,255,.10)); font-weight: 500; }
+.auto-tier { font-size: 11px; padding: 0 5px; border-radius: 8px; border: 1px solid var(--line); }
+.auto-tier-free { color: var(--ok, #2e8b57); border-color: currentColor; }
+.auto-tier-priced { color: var(--muted); }
+.auto-tier-unpriced { color: var(--warn); border-color: currentColor; }
+.auto-rej { margin-top: 6px; font-size: 12px; }
+.auto-rej summary { cursor: pointer; color: var(--muted); }

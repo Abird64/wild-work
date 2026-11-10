@@ -409,6 +409,54 @@ func TestCheckinNoCampaignKeepsRetryingUntilClaimed(t *testing.T) {
 	}
 }
 
+// TestCheckinNoEligibilityIsTerminalStopsRetry 「无资格」是**终态**（2026-11-10）：
+// 该账号没有这个活动的资格，重试到窗口结束也不会变 ⇒ 调度器必须把该时段标记为
+// 已完成，当天不再每分钟打一次上游（生产上曾 10:00–12:00 每分钟一次，纯噪音，
+// 且违反「严禁批量探测上游」纪律）。
+//
+// 与 TestCheckinNoCampaignKeepsRetryingUntilClaimed 互为对照：同样是「没领到」，
+// 但 no_campaign（上游刷新了活动、只是窗口/状态不合）**必须**继续重试。
+func TestCheckinNoEligibilityIsTerminalStopsRetry(t *testing.T) {
+	up := &reporterUpstream{statuses: []provider.CheckinStatus{provider.CheckinNoEligibility}}
+	s, _ := newReporterScheduler(up)
+	ch := []int{10 * 60}
+
+	s.runCheckin(10 * 60)
+	if !s.checkinSlotDone(10 * 60) {
+		t.Fatal("no_eligibility 是终态，应标记当日完成（不再窗口内重试）")
+	}
+	if s.checkinDue(ch, 10*60+1) {
+		t.Fatal("终态后不应再触发窗口重试")
+	}
+	if up.calls.Load() != 1 {
+		t.Errorf("checkin calls=%d want 1（终态后不应再打上游）", up.calls.Load())
+	}
+}
+
+// TestCheckinNoEligibilityResultFlags 无资格结果的语义位：终态 ⇒ Retryable=false、OK=true
+// （结构化路径里 OK = !Retryable）。文案照原样透出，供面板区分「无资格」与「签到成功」。
+func TestCheckinNoEligibilityResultFlags(t *testing.T) {
+	up := &reporterUpstream{statuses: []provider.CheckinStatus{provider.CheckinNoEligibility}}
+	s, p := newReporterScheduler(up)
+	res, err := s.CheckinAccount("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Retryable {
+		t.Errorf("no_eligibility 不得可重试: %+v", res)
+	}
+	if !res.OK {
+		t.Errorf("no_eligibility 是终态 ⇒ OK=true（终态 ≠ 领到积分，靠文案区分）: %+v", res)
+	}
+	if res.Msg != string(provider.CheckinNoEligibility) {
+		t.Errorf("msg = %q, want 透出原状态文案", res.Msg)
+	}
+	st, _ := p.Status("u1")
+	if !st.LastCheckinOK || st.LastCheckinMsg == "" {
+		t.Errorf("状态未落库: %+v", st)
+	}
+}
+
 // TestCheckinAlreadyStopsRetry 已领取即完成，不重试。
 func TestCheckinAlreadyStopsRetry(t *testing.T) {
 	up := &reporterUpstream{statuses: []provider.CheckinStatus{provider.CheckinAlready}}

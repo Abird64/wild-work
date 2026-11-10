@@ -6,17 +6,47 @@ import (
 	"sort"
 	"strings"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/config"
 	"wild-work/internal/provider"
 )
 
-// sceneAliases 三场景别名枚举（SD-9：本版固定三个，扩别名须同步改 SR-001 §1）。
+// sceneAliases 可编辑场景别名枚举。
+//
+// R165 起从三场景（fast/code/complex）收编为**一个自定义场景** `custom`：
+// 另半个名额给了「自动选路」——`auto` 是保留名，由 internal/auto 的打分引擎当场决策，
+// 不写进 model_map（见 server.chatCompletions 的保留名判定），因此**不是**这里的一员。
+//
+// 三个旧别名仍可被客户端继续使用（config.migrateSceneAliases 保留其映射或已把 complex
+// 的链继承到 custom），但面板不再提供编辑器，`SetSceneRouting` 也不再维护它们。
+//
 // 顺序即写入 model_map / model_fallback 的顺序，保证同一输入的提交结果深度相等（幂等）。
-var sceneAliases = []string{"fast", "code", "complex"}
+var sceneAliases = []string{"custom"}
 
-// isSceneAlias 判断 s 是否为三场景别名之一。
+// legacySceneAliases 已退役但仍可能活在配置里的三个旧场景别名（R165）。
+//
+// 它们不再可编辑，但**仍是客户端能写的模型名**（config.migrateSceneAliases 会把 complex
+// 的链继承到 custom，fast/code 则可能残留在老配置里）。因此 I4 的「模型名不得写成别名」
+// 判据必须把它们算进来：写 `workbuddy/fast` 同样是「永不触发的静默失效」。
+var legacySceneAliases = []string{"fast", "code", "complex"}
+
+// isSceneAlias 判断 s 是否为**可编辑**场景别名之一（提交端只认这一组）。
 func isSceneAlias(s string) bool {
 	for _, a := range sceneAliases {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
+
+// isAliasName 判断 s 是否属于「任何会作为路由别名生效的名字」：可编辑别名 ∪ 退役别名 ∪
+// 自动选路的保留名。I4 用它（比 isSceneAlias 宽），提交端仍用 isSceneAlias（严格）。
+func isAliasName(s string) bool {
+	if s == auto.Alias || isSceneAlias(s) {
+		return true
+	}
+	for _, a := range legacySceneAliases {
 		if s == a {
 			return true
 		}
@@ -31,10 +61,10 @@ func isSceneAlias(s string) bool {
 // model 是解析后的 deepseek-v4.1-flash ⇒ 永不相等 ⇒ 整条链静默永不触发，且不报任何错。
 // 故整串命中与「前缀/模型名」命中共算一档。
 func sceneAliasIn(v string) (string, bool) {
-	if isSceneAlias(v) {
+	if isAliasName(v) {
 		return v, true
 	}
-	if i := strings.Index(v, "/"); i > 0 && isSceneAlias(v[i+1:]) {
+	if i := strings.Index(v, "/"); i > 0 && isAliasName(v[i+1:]) {
 		return v[i+1:], true
 	}
 	return "", false
@@ -296,6 +326,13 @@ func (a *App) SetSceneRouting(req sceneRoutingReq) (*SceneRoutingResult, error) 
 	byAlias := make(map[string]sceneSubmit, len(req.Scenes))
 	for _, sc := range req.Scenes {
 		alias := strings.TrimSpace(sc.Alias)
+		// `auto` 是保留名（R165）：允许它出现在别名表里，会让「写 auto 得到的是用户映射的
+		// 固定模型、而不是自动选路」这种静默失效成立——这也是内层保留名判定要绕过
+		// model_map 的原因（两道闸一起挡，任一处漏了都不会真的坏）。
+		if alias == auto.Alias {
+			return nil, fmt.Errorf("scene_reserved_alias: %q 是自动选路的保留名，不能作为场景别名——"+
+				"想要自动选路请把客户端 model 写成 auto；想要固定模型请写 渠道/模型 全路径", alias)
+		}
 		if !isSceneAlias(alias) {
 			return nil, fmt.Errorf("scene_bad_shape: 未知场景别名 %q（只能是 %s）",
 				alias, strings.Join(sceneAliases, "/"))

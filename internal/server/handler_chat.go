@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"wild-work/internal/provider"
@@ -46,7 +47,49 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// model_map 为空/nil 时 resolveAlias 是恒等变换 ⇒ 旧行为逐字不变（口径 5）。
 	// resolved 保留给记账用（见下方 canonModel）：别名请求必须记到**真模型**名下，
 	// 否则 stats.channelOfModel 对裸名返回 ok=false，平台「今日 Token」列会静默漏计。
+	isAuto := isAutoModel(peek.Model) // 保留名：客户端原值优先于 model_map（见下）
 	resolved := h.resolveAlias(peek.Model)
+	// 自动选路（R165）：请求 model 写成 "auto" 时，由打分引擎按「免费优先 + 质价比」
+	// 当场算出一个具体的 `<channel>/<model>`。必须发生在 runtimeForModel 之前
+	// （后者只认带前缀的全路径）。
+	//
+	// `auto` 是**保留名**，判定取客户端的原始值 `peek.Model` 而非 resolveAlias 的结果：
+	// resolveAlias 会先查 model_map，配置里一条 `auto -> xxx` 就能把整套自动选路静默架空
+	// （这是最容易在面板里"手滑"造成的一类失效）。故别名表里的 `auto` 键一律被忽略。
+	// 场景路由写入端也拒收该键（app.SetSceneRouting），两道闸一起挡。
+	//
+	// 失败语义（三种，全部可诊断、绝不静默走错渠道）：
+	//   ① 未接入/未启用自动选路 ⇒ 400 提示改回显式模型名；
+	//   ② 已启用但候选被硬门全部剔除 ⇒ 503 + 指向 /api/auto/preview；
+	//   ③ 命中 ⇒ 覆盖 resolved，并记下备胎链供降级段使用。
+	var autoChain []string // 展示用（写进 X-Model-Auto-Chain，长度 = fallback_depth）
+	var autoOrder []string // 降级用（R166：全部候选的跨渠道全序，不受 depth 限制）
+	autoOrigin := false
+	if isAuto {
+		chosen, chain, order, ok := h.autoDecide(autoRequestFromBody(body))
+		switch {
+		case !ok && !h.hasAutoResolver():
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_model",
+				"model \"auto\" 未启用：请在面板「自动选路」开启，或改用显式的 <channel>/<model>")
+			return
+		case !ok:
+			writeOpenAIError(w, http.StatusServiceUnavailable, "no_candidate",
+				"自动选路当前没有可用候选（渠道全灭/模型能力不匹配/全部被排除）："+
+					"可在面板「自动选路」预览查看每个候选被剔除的原因")
+			return
+		}
+		resolved = chosen
+		autoChain = chain
+		autoOrder = order
+		autoOrigin = true
+		// 响应头必须在任何 WriteHeader 之前；sw 透传 Header。
+		w.Header().Set("X-Model-Origin", "auto")
+		w.Header().Set("X-Model-Auto-Chosen", chosen)
+		if len(autoChain) > 1 {
+			w.Header().Set("X-Model-Auto-Chain", strings.Join(autoChain, ","))
+		}
+		log.Printf("model auto chosen=%s chain=%s", chosen, strings.Join(chain, ","))
+	}
 	rt, model, err := h.runtimeForModel(resolved)
 
 	if err != nil {
@@ -54,6 +97,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientModel := peek.Model // 客户端请求的原始模型名（含 channel/ 前缀），回填进响应
+	// effortModel 思考强度映射的查表键：普通请求 = 客户端原始模型名（面板按客户端写法配档）；
+	// auto 请求 = 实际选中的模型全路径——客户端只写了 "auto"，拿它查表永远不命中，
+	// 而用户配的档位是按具体模型配的。
+	effortModel := clientModel
+	if autoOrigin {
+		effortModel = resolved
+	}
 	// 诊断：记录上下文构成摘要（config.body_log 关闭时立即返回，无实际开销）。
 	// 必须放在 rewriteModel 之前——要记的是客户端发来的原始体，而非改写后的。
 	if h.ledger != nil {
@@ -78,7 +128,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// agent 读 chunk.model / resp.model 即可感知实际执行模型）。
 	var fbApplied string
 	// skipSameChannel=false：入口降级不限制渠道（见请求内重入点的理由）。
-	fbID, primaryAvail := h.pickModelFallback(rt, model, false)
+	// auto 请求优先走决策链（本次请求算出的跨渠道次序），链走空才回落到配置的静态降级链。
+	var fbID string
+	var primaryAvail bool
+	if len(autoOrder) > 0 {
+		fbID, primaryAvail = h.pickAutoFallback(rt, model, autoOrder, false)
+	} else {
+		fbID, primaryAvail = h.pickModelFallback(rt, model, false)
+	}
 	// 口径说明：降级期间 ledger/stats 的 token 流水按**实际执行模型**记账
 	// （statRow.Model、AddUsage(acctModel)、ledgerModelOf(acctModel)）——谁实际工作、
 	// 谁实际消耗 token/积分，就记在谁名下（2026-10-16 口径变更，推翻原「按客户端
@@ -97,6 +154,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dispModel := clientModel
+	// auto 请求把实际执行模型写进响应（客户端应据此感知选了什么）；
+	// 选路来源由 X-Model-Origin / X-Model-Auto-Chosen 头承担。
+	if autoOrigin {
+		dispModel = resolved
+	}
 	if fbApplied != "" {
 		dispModel = fbApplied
 	}
@@ -119,7 +181,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 思考强度注入：客户端未传 reasoning_effort 且面板配置命中（按客户端请求模型 ID 匹配，
 	// 含 `*` 全局默认）时补上档位。未配置 = 零开销直通（applyEffort 内部快检）；
 	// 注入失败仅记日志、原 body 照发，绝不因此中断请求。
-	body = h.applyEffort(body, clientModel)
+	body = h.applyEffort(body, effortModel)
 
 	// 运行统计插桩：每客户端请求一行（最终结果；中间换号尝试不逐行——对齐 sidecar 口径）。
 	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
@@ -151,6 +213,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 再次调用；成功/错误出口与记账 defer 全留在本函数，「一个客户端请求一行」口径
 	// 不变）。serveRotation 保持纯轮转语义；降级状态同步（模型改写/档位注入/记账
 	// 归属/响应头）由本函数在重入前完成，与入口降级完全同构。
+	// 请求内降级的最大重入次数：普通请求沿用历史的 1 次（零行为变化）；
+	// auto 请求放宽到 3 次（R166）——全序里有几十个候选，只重入一次意味着
+	// 「首选与第一备胎同时额度见底」就把 503 直接砸给客户端，而后面明明还有能用的。
+	// 上限仍是常数而非 len(autoOrder)：每次重入都是一轮真实的轮转 + 上游调用，
+	// 无限重入会让一个请求在上游全线限流时打满轮转，代价远大于收益。
+	maxFallbackAttempts := 1
+	if len(autoOrder) > 0 {
+		maxFallbackAttempts = 3
+	}
 	for fbAttempt := 0; ; fbAttempt++ {
 		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, peek.Stream)
 		if res.done {
@@ -172,16 +243,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 不变量的设计约束）；此刻未写过任何字节（轮转失败路径天然成立——所有
 		// 写出都发生在成功流式/非流式分支内），降级头可安全补发；无规则/备胎无
 		// 容量 → fb2 为空，维持原样透传，与现状一致。
-		if fbAttempt == 0 && fallbackWorthy(res.lastKind) && !rt.SingleAccount {
-			// 请求内重入只跨渠道（skipSameChannel=true）：同渠道兄弟模型走的是同一批
-			// 账号，若本轮 429 其实是账号级限流（traework/qwenwork/qodercn/qodercom
-			// 等渠道把任意 429 都归 ErrSoftRate），再打一遍同一批账号必然二次撞墙；
-			// 且该账号第二个模型也撞墙后，pool 会把「模型级冷却」升级为「账号级冷却」
-			// ——冷却时长取已有条目的最晚到期时刻（不延长），变的是粒度：可用容量从
-			// 「1 个模型格子」缩到「0，整号对所有模型下线」。
-			// 入口降级不设此限：那里「该模型已全冷」是既有事实，换同渠道兄弟模型
-			// 正是降级链配置的本意（上游配额按模型计，模型 A 冷不代表模型 B 冷）。
-			if fb2, _ := h.pickModelFallback(rt, model, true); fb2 != "" {
+		if fbAttempt < maxFallbackAttempts && fallbackWorthy(res.lastKind) && !rt.SingleAccount {
+			fb2 := ""
+			if len(autoOrder) > 0 {
+				fb2, _ = h.pickAutoFallback(rt, model, autoOrder, true)
+			} else {
+				fb2, _ = h.pickModelFallback(rt, model, true)
+			}
+			if fb2 != "" {
 				if rt2, m2, err2 := h.runtimeForModel(fb2); err2 == nil {
 					nb, err3 := rewriteModel(body, m2)
 					if err3 == nil {
@@ -190,7 +259,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						// 改写成功才发——失败走透传时不得残留降级头（S1）。
 						w.Header().Set("X-Model-Fallback", clientModel+" -> "+fb2)
 						body = nb
-						body = h.applyEffort(body, clientModel) // 与入口同参数；键已存在不碰（双注入守卫）
+						body = h.applyEffort(body, effortModel) // 与入口同参数；键已存在不碰（双注入守卫）
 						rt, model = rt2, m2
 						dispModel = fb2
 						acctModel = provider.CanonicalModelID(fb2) // 记账归属=备胎（0021/PR #148 口径）

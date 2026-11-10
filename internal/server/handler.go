@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/auto"
 	"wild-work/internal/config"
 	"wild-work/internal/ledger"
 	"wild-work/internal/pool"
@@ -135,6 +136,30 @@ type Handler struct {
 
 	runtimesMu sync.RWMutex               // 保护 customRts 动态热更新（R66）
 	customRts  map[provider.Kind]*Runtime // 自定义渠道运行时
+
+	// autoMu 保护 autoResolve（自动选路解析器，R165；面板保存后由 app 层回调）。
+	// nil = 未接入自动选路 ⇒ 请求 model="auto" 报错，其余路径零行为变化。
+	autoMu      sync.RWMutex
+	autoResolve func(req auto.Request) (chosen string, chain, order []string, ok bool)
+}
+
+// SetAutoResolver 注入自动选路解析器（R165；main 装配时传 app.AutoResolver()）。
+// nil 或不注入 ⇒ 自动选路关闭，`model:"auto"` 由 runtimeForModel 报「需要渠道前缀」。
+func (h *Handler) SetAutoResolver(fn func(req auto.Request) (chosen string, chain, order []string, ok bool)) {
+	h.autoMu.Lock()
+	h.autoResolve = fn
+	h.autoMu.Unlock()
+}
+
+// autoDecide 取当前自动选路解析器并执行一次决策。
+func (h *Handler) autoDecide(req auto.Request) (chosen string, chain, order []string, ok bool) {
+	h.autoMu.RLock()
+	fn := h.autoResolve
+	h.autoMu.RUnlock()
+	if fn == nil {
+		return "", nil, nil, false
+	}
+	return fn(req)
 }
 
 // SetCustomRuntimes 热更新自定义渠道运行时（面板保存后由 app 层回调）。

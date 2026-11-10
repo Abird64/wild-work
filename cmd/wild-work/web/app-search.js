@@ -14,8 +14,14 @@ const RANK_POOL = { traework: "trae", traecode: "trae" };
 const RANK_UNROUTED = { workbuddy: true };
 
 // 场景权重（SR-008 §2.4）。W = 额度维：余额越多越该用（0.75）＋ 快到期的额外加分（0.25）。
+// R165 收编：可编辑场景只剩 custom。它的权重沿用原 complex（custom 的链就是从 complex 继承的：
+// P 性能 / C 能力 / W 余额三分，能力权重最高——"自定义"是一次手写选择，值得为能力让一点速度）。
+// ⚠️ 场景名改了就**必须**同步这张表：查不到权重时 rankCandidates 直接返回空数组
+// （表现为"推荐列表一片空白"而不是报错，很难看出原因）。
 const RANK_WEIGHTS = {
-  fast:    { P: 0.60, C: 0,    W: 0.40 },
+  custom: { P: 0.30, C: 0.50, W: 0.20 },
+  // legacy 两键保留：老面板截图/文档里的 code/complex 仍可能被手工调用（推荐列表 tab 已只剩 custom）。
+  // 删掉它们不会报错，只会让任何传旧名的调用静默返回空数组——留着的成本是零。
   code:    { P: 0.35, C: 0.45, W: 0.20 },
   complex: { P: 0.30, C: 0.50, W: 0.20 },
 };
@@ -99,14 +105,14 @@ function rankCandidates(fees, stats, scene, candidatesData) {
       // tools 是硬条件：未采集/未声明一律淘汰（SR-001 §2 I4 家族；MS-001 §7.2）
       if (tools !== true) continue;
       cScore = 0.5 + (ctx !== null && ctx >= 128000 ? 0.5 : 0);
-    } else if (scene === "complex") {
+    } else if (scene === "complex" || scene === "custom") {
       let acc = 0, wsum = 0;
       if (ctx !== null) { acc += 0.6 * (ctx >= 500000 ? 1 : ctx >= 128000 ? 0.6 : 0.3); wsum += 0.6; }
       if (rsn !== null) { acc += 0.4 * (rsn ? 1 : 0); wsum += 0.4; }
       cScore = wsum > 0 ? acc / (0.6 + 0.4) : null;
       if (ctx === null) missing.push("context_window");
     } else {
-      // fast：能力只作门槛（ctx >= 128k），不进评分（否则 1M 上下文白送分）
+      // 其它（历史 fast 名）：能力只作门槛（ctx >= 128k），不进评分（否则 1M 上下文白送分）
       cScore = ctx !== null ? (ctx >= 128000 ? 1 : 0.4) : 0.5;
       if (ctx === null) missing.push("context_window");
     }

@@ -518,15 +518,31 @@ const (
 	CheckinNoCampaign CheckinStatus = "no_campaign"
 	// CheckinNoToken 本地无可用凭据（可重试，refresh 后可能恢复）。
 	CheckinNoToken CheckinStatus = "no_token"
+	// CheckinNoEligibility **该账号没有这个活动的资格**（终态，不可重试）。
+	//
+	// 与 CheckinNoCampaign 的区别是「重试有没有意义」：
+	//   - no_campaign：上游本次没下发**可领**活动，但账号**有资格**（活动没建/窗口未开），
+	//     等上游刷新即可 ⇒ 可重试。
+	//   - no_eligibility：上游**根本没有下发任何领积分活动**，实测同一账号在官方客户端里
+	//     同样看不到该入口 ⇒ 差异是账号资格，不是客户端类型、不是请求头、也不是解析缺陷
+	//     （R95）。重试到窗口结束也不会变 ⇒ 终态。
+	//
+	// 终态语义 = 调度器把该时段标记为「已完成」，不再每分钟重试（否则 10:00–12:00
+	// 每分钟打一次上游，纯噪音且违反「严禁批量探测上游」纪律）。
+	CheckinNoEligibility CheckinStatus = "no_eligibility"
 	// CheckinError 其它失败（可重试）。
 	CheckinError CheckinStatus = "error"
 )
 
 // Retryable 报告该状态是否应在当日窗口内继续重试。
 // 只有「已领取」和「本次领取成功」算完成——上游同款判定。
+//
+// CheckinNoEligibility（无资格）也是**终态**：重试无意义（见常量注释）。
+// 注意「终态」≠「领到积分」：调度器里 r.OK = !Retryable()，故无资格会记成 ok=true，
+// 靠 Msg 文案（面板显示「无领取资格：…」）与账本口径区分，不进积分收入。
 func (s CheckinStatus) Retryable() bool {
 	switch s {
-	case CheckinClaimed, CheckinAlready:
+	case CheckinClaimed, CheckinAlready, CheckinNoEligibility:
 		return false
 	default:
 		return true

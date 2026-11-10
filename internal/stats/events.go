@@ -11,7 +11,8 @@
 //	traework/client.go:455  traework checkin claim response uid=%s code=%d msg=%s
 //	qodercn/checkin.go:81、qodercom/checkin.go:77（结构化上报）：
 //	      <p> checkin campaigns uid=%s status=%s claimed=%t amount=%d msg=%s err=%v
-//	      status ∈ claimed/already_claimed/no_campaign/no_token/error，仅 claimed 有新入账
+//	      status ∈ claimed/already_claimed/no_campaign/no_eligibility/no_token/error，
+//	      仅 claimed 有新入账
 //	raccoon/checkin.go（结构化上报，R65，与 qoder 同形状）：
 //	      raccoon checkin setting_info uid=%s status=%s claimed=%t amount=%d msg=%s err=%v
 //	      status ∈ claimed/already_claimed/no_token/error，仅 claimed 有新入账
@@ -55,7 +56,7 @@ var (
 	reQoderClaim = regexp.MustCompile(
 		`^(\d{4})/(\d{2})/(\d{2}) \d{2}:\d{2}:\d{2}\.\d+ (qodercn|qodercom) checkin (?:daily|campaigns) uid=(\S+) ok=(true|false) claimed=(true|false) amount=(\d+) `)
 	// 结构化领取行（qoder 系与 raccoon 共用形状）：ok= 改 status=（claimed/
-	// already_claimed/no_campaign/no_token/error），窗口内每分钟重试会重复落行，
+	// already_claimed/no_campaign/no_eligibility/no_token/error），窗口内每分钟重试会重复落行，
 	// uid|day 幂等去重兜底。小浣熊（R65）的日志行与 qoder 同构
 	// （`raccoon checkin setting_info uid=… status=… claimed=… amount=…`），
 	// 语义也一致（结构化 status + 上游实发 amount），故共用本条正则。
@@ -147,7 +148,7 @@ func (s *Stats) observeLine(line string) bool {
 	}
 	if m := reQoderClaimStatus.FindStringSubmatch(line); m != nil {
 		// 结构化行：仅 status=claimed 是新入账；already_claimed/no_campaign/
-		// no_token/error 均无收入。claimed 旗标做双重校验（上游同义下发）。
+		// no_eligibility/no_token/error 均无收入。claimed 旗标做双重校验（上游同义下发）。
 		if m[6] != "claimed" || m[7] != "true" {
 			return true
 		}

@@ -223,7 +223,16 @@ const patched =
   + ', fbSavePayload: typeof fbSavePayload === "function" ? fbSavePayload : () => null'
   // 三场景路由编辑器（SR-005b）：sceneRules / state 都是可变 `let`，只能靠源码作用域注入器读写。
   // 同样用 typeof 兜底，让「改动前」的新断言逐条变红而不是 ReferenceError 崩掉整份检查。
-  + ", SCENE_ALIASES, SCENE_CANDIDATES"
+  + ", SCENE_ALIASES, SCENE_CANDIDATES, AUTO_ALIAS"
+  // 自动选路卡片（R165）：autoDraft / autoPreviewData 也是可变 `let`，同样靠注入器读写。
+  + ", __setAutoDraft: (d) => { autoDraft = d ? JSON.parse(JSON.stringify(d)) : null; }"
+  + ", __setAutoPreview: (d) => { autoPreviewData = d ? JSON.parse(JSON.stringify(d)) : null; }"
+  + ', AUTO_WEIGHT_META: typeof AUTO_WEIGHT_META === "object" ? AUTO_WEIGHT_META : []'
+  + ', autoNorm: typeof autoNorm === "function" ? autoNorm : () => ({})'
+  + ', renderAutoCard: typeof renderAutoCard === "function" ? renderAutoCard : () => {}'
+  + ', renderAutoPreview: typeof renderAutoPreview === "function" ? renderAutoPreview : () => {}'
+  + ', autoTierLabel: typeof autoTierLabel === "function" ? autoTierLabel : () => ""'
+
   + ", __setSceneRules: (r) => { sceneRules = JSON.parse(JSON.stringify(r)); }"
   + ", __getSceneRules: () => JSON.parse(JSON.stringify(sceneRules))"
   + ", __setState: (s) => { state = s; }"
@@ -795,7 +804,7 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     ],
   };
   const cands = { scenes: [
-    { alias: "fast", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" },
+    { alias: "custom", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" },
                                   { id: "kilo/nvidia/nemotron:free" }, { id: "workbuddy/deepseek-v4.1-flash" },
                                   { id: "traecode/deepseek-v4.1-flash" }] },
     { alias: "code", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" },
@@ -803,25 +812,25 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     { alias: "complex", candidates: [{ id: "traework/deepseek-v4.1-flash" }, { id: "codearts/GLM-5.2" }] },
   ] };
 
-  const fastList = T.rankCandidates(fees, stats, "fast", cands);
+  const customList = T.rankCandidates(fees, stats, "custom", cands);
 
   check("SR-005a：UNAVAILABLE（workbuddy）不出现在结果里",
-    !fastList.some((x) => x.id.startsWith("workbuddy/")));
+    !customList.some((x) => x.id.startsWith("workbuddy/")));
 
   // UNPRICED 与 PRICED 的位置关系（核心防作弊断言）
-  const iUnpriced = fastList.findIndex((x) => x.state === "UNPRICED");
-  const lastPriced = fastList.map((x) => x.state).lastIndexOf("PRICED");
+  const iUnpriced = customList.findIndex((x) => x.state === "UNPRICED");
+  const lastPriced = customList.map((x) => x.state).lastIndexOf("PRICED");
   check("SR-005a：UNPRICED（消耗未知）不得排在 PRICED 之前",
     iUnpriced === -1 || lastPriced === -1 || iUnpriced > lastPriced,
     `unpriced@${iUnpriced} lastPriced@${lastPriced}`);
 
   // T 分级单调（无实测的必须排在所有有实测的之后）
-  const tiers = fastList.map((x) => x.tier);
+  const tiers = customList.map((x) => x.tier);
   check("SR-005a：T 分级非降序（T3 无实测排最后）",
     tiers.every((t, i) => i === 0 || t >= tiers[i - 1]), tiers.join(","));
 
   // codearts 无实测 ⇒ 必须是 T3
-  const ca = fastList.find((x) => x.id === "codearts/GLM-5.2");
+  const ca = customList.find((x) => x.id === "codearts/GLM-5.2");
   check("SR-005a：无性能实测的模型被标为 T3", !!ca && ca.tier === 3, ca ? `tier=${ca.tier}` : "缺失");
 
   // 账号池归并：traecode 与 traework 必须拿到**同一个**额度分量。
@@ -839,25 +848,25 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     !codeList.some((x) => x.id === "codearts/GLM-5.2"));
 
   // FREE 必须被识别为零消耗（不是 UNPRICED）
-  const freeRow = fastList.find((x) => x.id === "kilo/nvidia/nemotron:free");
+  const freeRow = customList.find((x) => x.id === "kilo/nvidia/nemotron:free");
   check("SR-005a：free=true 识别为 FREE 而非 UNPRICED",
     !!freeRow && freeRow.state === "FREE", freeRow ? freeRow.state : "缺失");
 
   // 纯函数：同输入两次结果相等，且入参未被修改
   const before = JSON.stringify(fees);
-  const a1 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands));
-  const a2 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands));
+  const a1 = JSON.stringify(T.rankCandidates(fees, stats, "custom", cands));
+  const a2 = JSON.stringify(T.rankCandidates(fees, stats, "custom", cands));
   check("SR-005a：纯函数——同输入两次结果逐字节相等", a1 === a2);
   check("SR-005a：纯函数——不修改入参", JSON.stringify(fees) === before);
 
   // 证据等级不参与排序（把 evidence 塞进去也不改变顺序）
   const cands2 = JSON.parse(JSON.stringify(cands));
   cands2.scenes[0].candidates.forEach((c, i) => { c.report_evidence = { rate: i % 2 ? "unverified" : "local-measured" }; });
-  const a3 = JSON.stringify(T.rankCandidates(fees, stats, "fast", cands2));
+  const a3 = JSON.stringify(T.rankCandidates(fees, stats, "custom", cands2));
   check("SR-005a：证据等级不参与排序（改 evidence 后顺序与分数均不变）", a1 === a3);
   // 再补一条直接断言：即便 candidatesData 里给了 evidence，输出里也不得把它带进 score 计算
-  const withEv = T.rankCandidates(fees, stats, "fast", cands2);
-  const withoutEv = T.rankCandidates(fees, stats, "fast", cands);
+  const withEv = T.rankCandidates(fees, stats, "custom", cands2);
+  const withoutEv = T.rankCandidates(fees, stats, "custom", cands);
   check("SR-005a：evidence 不进入 score（同一模型两种 evidence 下 score 相同）",
     withEv.every((x) => {
       const y = withoutEv.find((z) => z.id === x.id);
@@ -865,85 +874,84 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     }));
 }
 
-// ---- 场景 7：三场景路由编辑器（SR-005b）----
-// 验收要点（SR-005 卡）：三场景卡片渲染、字段齐全、非法输入四类文案、回填字段、
-// 保存前旧值复制、回读不一致报错。全部为纯函数/字符串级断言——ui-static-check 不跑浏览器。
+// ---- 场景 7：路由编辑器（SR-005b，R165 收编：一个自定义场景 + 一个自动选路）----
+// 验收要点：单张 custom 卡片渲染、字段齐全、非法输入三类文案、回填字段、
+// 保存前旧值复制、回读不一致报错、`auto` 保留名不得写成主模型/备胎。
+// 全部为纯函数/字符串级断言——ui-static-check 不跑浏览器。
 {
-  // 造一份与服务端同形的输入：model_map 三键 + model_fallback 三条规则（含互为备胎）
+  // 造一份与服务端同形的输入：model_map 单键 + model_fallback 单规则
   const compat = {
     default_channel: "qwenwork", max_tokens_cap: 32000,
-    model_map: {
-      fast: "qwenwork/flash",
-      code: "traework/deepseek-v4.1-flash",
-      complex: "raccoon/sn-deepseek-v4-1-flash-1017",
-    },
+    model_map: { custom: "qwenwork/flash" },
   };
   const fallback = [
     { from: "qwenwork/flash", to: ["traecode/deepseek-v4.1-flash", "qodercn/glm-5.3-flash"] },
-    { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
-    { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] },
   ];
 
   // ① 归一：model_map 给 from、model_fallback 按 From 对齐给 to
   T.__setSceneRules(T.sceneNormalize(compat, fallback));
   let rs = T.__getSceneRules();
-  check("SR-005b：归一后三别名齐备且顺序固定 fast/code/complex",
-    JSON.stringify(Object.keys(rs)) === JSON.stringify(["fast", "code", "complex"]),
+  check("SR-005b：归一后只有 custom 一个可编辑别名（R165 收编）",
+    JSON.stringify(Object.keys(rs)) === JSON.stringify(["custom"]),
     JSON.stringify(Object.keys(rs)));
-  check("SR-005b：fast.from 取自 model_map", rs.fast.from === "qwenwork/flash", rs.fast.from);
-  check("SR-005b：fast.to 沿用降级链原序（未被重排/未被清洗）",
-    JSON.stringify(rs.fast.to) === JSON.stringify(["traecode/deepseek-v4.1-flash", "qodercn/glm-5.3-flash"]),
-    JSON.stringify(rs.fast.to));
-  check("SR-005b：complex.to 保留与 code 的互为备胎（SD-3 合法，不得剔）",
-    rs.complex.to.includes("traework/deepseek-v4.1-flash"), JSON.stringify(rs.complex.to));
+  check("SR-005b：SCENE_ALIASES 只含 custom，且 auto 不是其中的成员（auto 是保留名，不可当场景编辑）",
+    JSON.stringify(T.SCENE_ALIASES.map((x) => x.alias)) === JSON.stringify(["custom"]),
+    JSON.stringify(T.SCENE_ALIASES.map((x) => x.alias)));
+  check("SR-005b：custom.from 取自 model_map", rs.custom.from === "qwenwork/flash", rs.custom.from);
+  check("SR-005b：custom.to 沿用降级链原序（未被重排/未被清洗）",
+    JSON.stringify(rs.custom.to) === JSON.stringify(["traecode/deepseek-v4.1-flash", "qodercn/glm-5.3-flash"]),
+    JSON.stringify(rs.custom.to));
   check("SR-005b：model_map 有别名但缺规则时 to 记空数组（不静默消失）",
-    (() => { const r = T.sceneNormalize({ model_map: { fast: "x/y" } }, []); return JSON.stringify(r.fast.to) === "[]"; })());
+    (() => { const r = T.sceneNormalize({ model_map: { custom: "x/y" } }, []); return JSON.stringify(r.custom.to) === "[]"; })());
 
-  // ② 渲染：三张卡片 + 字段齐全（别名徽标、中文名、主模型 input、备胎 chips、追加框、降级顺序）
+  // ② 渲染：单张卡片 + 字段齐全
   T.renderSceneCards();
   const html = document.getElementById("sceneCards").innerHTML;
-  check("SR-005b：渲染出三张场景卡片", (html.match(/data-scene="/g) || []).length === 3,
+  check("SR-005b：只渲染一张场景卡片（R165 收编后）", (html.match(/data-scene="/g) || []).length === 1,
     String((html.match(/data-scene="/g) || []).length));
-  check("SR-005b：三别名徽标齐备", ["fast", "code", "complex"].every((a) => html.includes(`>${a}</span>`)));
-  check("SR-005b：三场景中文名齐备", ["快速", "代码", "复杂"].every((l) => html.includes(l)));
-  check("SR-005b：每张卡片都有主模型输入框", (html.match(/class="input scene-from"/g) || []).length === 3);
+  check("SR-005b：别名徽标是 custom", html.includes(">custom</span>"));
+  check("SR-005b：中文名是「自定义」", html.includes("自定义"));
+  check("SR-005b：卡片有主模型输入框", (html.match(/class="input scene-from"/g) || []).length === 1);
   check("SR-005b：主模型输入框带 data-scene-from（事件委托靠它定位）",
-    (html.match(/data-scene-from="/g) || []).length === 3);
+    (html.match(/data-scene-from="/g) || []).length === 1);
   check("SR-005b：备胎 chip 带序号 1/2", html.includes('class="chip-idx">1</span>') && html.includes('class="chip-idx">2</span>'));
   check("SR-005b：备胎 chip 有上移/下移/移除三个操作", html.includes("data-scene-up=") && html.includes("data-scene-down=") && html.includes("data-scene-del="));
-  check("SR-005b：每张卡片都有追加备胎输入框", (html.match(/class="input scene-to-add"/g) || []).length === 3);
+  check("SR-005b：卡片有追加备胎输入框", (html.match(/class="input scene-to-add"/g) || []).length === 1);
   check("SR-005b：卡片尾部显示降级顺序摘要（原模型 → 备胎 → …）", /降级顺序：qwenwork\/flash → traecode/.test(html));
   check("SR-005b：首位的上移按钮置灰（is-off）、末位的下移置灰",
-    /data-scene-up="fast:0" title="上移一位（更优先）" class="is-off"/.test(html)
-    && /data-scene-down="fast:1" title="下移一位" class="is-off"/.test(html));
-  check("SR-005b：互备提示是 info 级（不判错，SD-3）",
-    /互为备胎是合法的/.test(html) && !/data-invalid="1"/.test(html));
+    /data-scene-up="custom:0" title="上移一位（更优先）" class="is-off"/.test(html)
+    && /data-scene-down="custom:1" title="下移一位" class="is-off"/.test(html));
 
-  // ③ 非法输入四类（卡上验收项）：自环 / 别名进 from / 别名进 to / 两场景同主模型
+  // ③ 非法输入（卡上验收项）：自环 / 别名进 from / 别名进 to / 保留名 auto 进 from
   const mk = (m) => T.sceneProblems(T.sceneNormalize({ model_map: m.map, default_channel: "x", max_tokens_cap: 1 }, m.fb));
-  const loopP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
-                     fb: [{ from: "a/m", to: ["a/m"] }, { from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+  const loopP = mk({ map: { custom: "a/m" }, fb: [{ from: "a/m", to: ["a/m"] }] })
     .filter((p) => p.level === "error").map((p) => p.msg);
   check("SR-005b 非法①：自环（备胎=自己主模型）被拦，文案含「自环」",
     loopP.some((m) => m.includes("自环")), loopP.join("|"));
-  const aliasFromP = mk({ map: { fast: "fast", code: "b/m", complex: "c/m" },
-                          fb: [{ from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+  const aliasFromP = mk({ map: { custom: "custom" }, fb: [] })
     .filter((p) => p.level === "error").map((p) => p.msg);
   check("SR-005b 非法②：主模型写成别名被拦，文案说明「整条链永不触发」",
     aliasFromP.some((m) => m.includes("不能写成别名") && m.includes("永不触发")), aliasFromP.join("|"));
-  const aliasToP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
-                        fb: [{ from: "a/m", to: ["code"] }, { from: "b/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+  // 保留名 auto 与退役别名 fast 也必须算「别名」：写成 workbuddy/auto 或裸 fast 都不会真触发
+  const autoFromP = mk({ map: { custom: "auto" }, fb: [] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法②b：主模型写成保留名 auto 被拦（服务端会以 scene_reserved_alias 拒绝）",
+    autoFromP.some((m) => m.includes("不能写成别名")), autoFromP.join("|"));
+  const retiredFromP = mk({ map: { custom: "fast" }, fb: [] })
+    .filter((p) => p.level === "error").map((p) => p.msg);
+  check("SR-005b 非法②c：主模型写成已退役别名 fast 仍被拦（服务端 I4 同口径）",
+    retiredFromP.some((m) => m.includes("不能写成别名")), retiredFromP.join("|"));
+  const aliasToP = mk({ map: { custom: "a/m" }, fb: [{ from: "a/m", to: ["complex"] }] })
     .filter((p) => p.level === "error").map((p) => p.msg);
   check("SR-005b 非法③：备胎写成别名被拦",
     aliasToP.some((m) => m.includes("备胎不能写成别名")), aliasToP.join("|"));
-  const dupP = mk({ map: { fast: "a/m", code: "a/m", complex: "c/m" },
-                    fb: [{ from: "a/m", to: ["x/y"] }, { from: "c/m", to: ["x/y"] }] })
+  const autoToP = mk({ map: { custom: "a/m" }, fb: [{ from: "a/m", to: ["auto"] }] })
     .filter((p) => p.level === "error").map((p) => p.msg);
-  check("SR-005b 非法④：两场景共用主模型被拦，文案说明「只会有一条生效」",
-    dupP.some((m) => m.includes("重复") && m.includes("只会有一条生效")), dupP.join("|"));
+  check("SR-005b 非法③b：备胎写成保留名 auto 被拦",
+    autoToP.some((m) => m.includes("备胎不能写成别名")), autoToP.join("|"));
   // 空备胎链是**警告不是错误**（拦它会让用户没法先配主模型）
-  const emptyP = mk({ map: { fast: "a/m", code: "b/m", complex: "c/m" },
-                      fb: [{ from: "a/m", to: [] }] }).filter((p) => p.alias === "fast");
+  const emptyP = mk({ map: { custom: "a/m" }, fb: [{ from: "a/m", to: [] }] })
+    .filter((p) => p.alias === "custom");
   check("SR-005b：空备胎链只给 warn（不阻断保存）",
     emptyP.some((p) => p.level === "warn") && !emptyP.some((p) => p.level === "error"),
     JSON.stringify(emptyP));
@@ -957,7 +965,8 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   check("SR-005b：提交载荷回填 default_channel（漏传会把默认渠道清零）",
     payload.default_channel === "qwenwork", payload.default_channel);
   check("SR-005b：提交载荷回填 max_tokens_cap", payload.max_tokens_cap === 32000, String(payload.max_tokens_cap));
-  check("SR-005b：提交载荷按固定顺序 fast/code/complex", JSON.stringify(payload.scenes.map((x) => x.alias)) === JSON.stringify(["fast", "code", "complex"]));
+  check("SR-005b：提交载荷只含 custom 一个场景", JSON.stringify(payload.scenes.map((x) => x.alias)) === JSON.stringify(["custom"]),
+    JSON.stringify(payload.scenes.map((x) => x.alias)));
   check("SR-005b：提交载荷三项齐（alias/from/to）",
     payload.scenes.every((x) => typeof x.alias === "string" && typeof x.from === "string" && Array.isArray(x.to)));
   check("SR-005b：dry_run 附加字段不污染正常载荷",
@@ -965,11 +974,10 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
 
   // ⑤ 保存前旧值复制（SD-1 的唯一回滚抓手，R-3 不得省）
   const cfgText = T.sceneConfigText();
-  check("SR-005b：备份文本含 model_map 三别名", ["fast", "code", "complex"].every((a) => cfgText.includes(`"${a}"`)));
-  check("SR-005b：备份文本含三条降级链的 from", fallback.every((r) => cfgText.includes(r.from)));
+  check("SR-005b：备份文本含 custom 别名", cfgText.includes('"custom"'));
+  check("SR-005b：备份文本含降级链的 from", fallback.every((r) => cfgText.includes(r.from)));
   check("SR-005b：备份文本是合法 JSON（可直接回粘）", (() => { try { JSON.parse(cfgText); return true; } catch (e) { return false; } })());
-  // ⚠️ 顺序断言：备份必须发生在写请求**之前**。若反过来（先写后备份），
-  // 剪贴板里装的就是服务端刚写的新值——等于没有备份，R-3 想防的正是这个。
+  // ⚠️ 顺序断言：备份必须发生在写请求**之前**。
   {
     const saveBody = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
     const iBk = saveBody.indexOf("await sceneBackup()");
@@ -978,7 +986,7 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     check("SR-005b：备份发生在写请求之前（先备份后提交，顺序不得反）",
       iBk > 0 && iSave > 0 && iBk < iSave, `备份@${iBk} 提交@${iSave}`);
   }
-  check("SR-005b：备份文本只含三场景规则（不夹带其它自建规则）",
+  check("SR-005b：备份文本只含本场景规则（不夹带其它自建规则）",
     (() => {
       T.__setState({ compat: { model_map: compat.model_map, default_channel: "qwenwork", max_tokens_cap: 1 },
         model_fallback: fallback.concat([{ from: "zzz/custom", to: ["q/1"] }]) });
@@ -988,47 +996,36 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   T.__setState({ compat: { default_channel: "qwenwork", max_tokens_cap: 32000, model_map: compat.model_map }, model_fallback: fallback });
 
   // ⑥ 回读不一致必须报错（不得静默当成功）
-  //
-  // ⚠️ 2026-10-29 独立审核抓到：原断言用 `T.sceneNormalize(compat, fallback)` 当期望值，
-  // 而生产路径上 sceneRules 会被服务端返回的 res **先覆盖再比对** —— 断言测的是"函数的意图"，
-  // 不是"生产的调用顺序"，于是自证缺陷全绿。现在按生产语义测：期望值 = **请求前快照**。
+  // 期望值 = **请求前快照**（生产路径就是这个语义；拿服务端返回后再比等于自证）
   T.__setSceneRules(T.sceneNormalize(compat, fallback));
-  const expected = T.scenePayload(); // 等价于 saveSceneRouting 里发请求前取的 expected
+  const expected = T.scenePayload();
   const good = { model_map: compat.model_map, model_fallback: fallback };
   check("SR-005b：回读一致时 verifySceneReadback 返回空串",
     T.verifySceneReadback(good, expected) === "", T.verifySceneReadback(good, expected));
 
-  // from 不一致
-  const bad = { model_map: Object.assign({}, compat.model_map, { fast: "someone/else" }), model_fallback: fallback };
+  const bad = { model_map: Object.assign({}, compat.model_map, { custom: "someone/else" }), model_fallback: fallback };
   const msg = T.verifySceneReadback(bad, expected);
   check("SR-005b：主模型不一致时报出差异（含期望与实际）",
-    msg.includes("fast") && msg.includes("qwenwork/flash") && msg.includes("someone/else"), msg);
+    msg.includes("custom") && msg.includes("qwenwork/flash") && msg.includes("someone/else"), msg);
 
-  // to 项数减少（服务端会 trim/去空项）——原实现只比 from，这类差异检不出
   const badTo = {
     model_map: compat.model_map,
-    model_fallback: [{ from: "qwenwork/flash", to: ["traecode/deepseek-v4.1-flash"] },
-                     { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
-                     { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] }],
+    model_fallback: [{ from: "qwenwork/flash", to: ["traecode/deepseek-v4.1-flash"] }],
   };
   const toMsg = T.verifySceneReadback(badTo, expected);
   check("SR-005b：备胎链项数被静默删减时报错（原实现只比 from ⇒ 漏）",
-    toMsg.includes("项数") && toMsg.includes("fast"), toMsg);
+    toMsg.includes("项数") && toMsg.includes("custom"), toMsg);
 
-  // to 顺序被改
   const badOrder = {
     model_map: compat.model_map,
-    model_fallback: [{ from: "qwenwork/flash", to: ["qodercn/glm-5.3-flash", "traecode/deepseek-v4.1-flash"] },
-                     { from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017", "qwenwork/flash"] },
-                     { from: "raccoon/sn-deepseek-v4-1-flash-1017", to: ["traework/deepseek-v4.1-flash", "qwenwork/flash"] }],
+    model_fallback: [{ from: "qwenwork/flash", to: ["qodercn/glm-5.3-flash", "traecode/deepseek-v4.1-flash"] }],
   };
   const ordMsg = T.verifySceneReadback(badOrder, expected);
   check("SR-005b：备胎链顺序被改时报错（序号有语义）",
-    ordMsg.includes("顺序") && ordMsg.includes("fast"), ordMsg);
+    ordMsg.includes("顺序") && ordMsg.includes("custom"), ordMsg);
 
   check("SR-005b：服务端没回 model_map 时不误报（返回空串）", T.verifySceneReadback({}, expected) === "");
   check("SR-005b：没传期望快照时不误报（返回空串）", T.verifySceneReadback(good) === "");
-  // 断言生产路径确实传了快照（防有人改回"读被覆盖后的 sceneRules"）
   check("SR-005b：保存路径把**请求前**快照传给校验（不是覆盖后的编辑态）",
     (() => {
       const fn = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
@@ -1041,61 +1038,56 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   // ⑦ 改主模型 / 追加备胎的本地守卫
   T.__setSceneRules(T.sceneNormalize(compat, fallback));
   const before = JSON.stringify(T.__getSceneRules());
-  T.sceneSetFrom("fast", "traecode/deepseek-v4.1-flash"); // 该模型在 fast 的备胎链上 ⇒ 会成自环
+  T.sceneSetFrom("custom", "qodercn/glm-5.3-flash"); // 该模型在备胎链上 ⇒ 会成自环
   check("SR-005b：把主模型改成链上已有的备胎被拒（不静默删数据，与 SR-003 同口径）",
     JSON.stringify(T.__getSceneRules()) === before, JSON.stringify(T.__getSceneRules()));
-  T.sceneAddTo("fast", "qwenwork/flash");
+  T.sceneAddTo("custom", "qwenwork/flash");
   check("SR-005b：追加与主模型相同的备胎被拒", JSON.stringify(T.__getSceneRules()) === before);
-  T.sceneAddTo("fast", "traecode/deepseek-v4.1-flash");
+  T.sceneAddTo("custom", "traecode/deepseek-v4.1-flash");
   check("SR-005b：追加已在链上的备胎被拒（去重）", JSON.stringify(T.__getSceneRules()) === before);
-  T.sceneAddTo("fast", "kilo/cohere/north-mini-code:free");
-  check("SR-005b：追加新备胎成功", (T.__getSceneRules().fast.to || []).includes("kilo/cohere/north-mini-code:free"));
-  // 改序：上移第 3 项 → 变第 2 项（序号即优先级）
-  T.sceneMoveTo("fast", 2, -1);
+  T.sceneAddTo("custom", "kilo/cohere/north-mini-code:free");
+  check("SR-005b：追加新备胎成功", (T.__getSceneRules().custom.to || []).includes("kilo/cohere/north-mini-code:free"));
+  T.sceneMoveTo("custom", 2, -1);
   check("SR-005b：上移改序生效且序号随之变化",
-    JSON.stringify(T.__getSceneRules().fast.to) ===
+    JSON.stringify(T.__getSceneRules().custom.to) ===
       JSON.stringify(["traecode/deepseek-v4.1-flash", "kilo/cohere/north-mini-code:free", "qodercn/glm-5.3-flash"]),
-    JSON.stringify(T.__getSceneRules().fast.to));
-  T.sceneMoveTo("fast", 0, -1);
+    JSON.stringify(T.__getSceneRules().custom.to));
+  T.sceneMoveTo("custom", 0, -1);
   check("SR-005b：首位上移是空操作（边界不越界）",
-    T.__getSceneRules().fast.to[0] === "traecode/deepseek-v4.1-flash");
-  T.sceneDelTo("fast", 1);
+    T.__getSceneRules().custom.to[0] === "traecode/deepseek-v4.1-flash");
+  T.sceneDelTo("custom", 1);
   check("SR-005b：移除备胎生效",
-    !T.__getSceneRules().fast.to.includes("kilo/cohere/north-mini-code:free"),
-    JSON.stringify(T.__getSceneRules().fast.to));
+    !T.__getSceneRules().custom.to.includes("kilo/cohere/north-mini-code:free"),
+    JSON.stringify(T.__getSceneRules().custom.to));
 
   // ⑧ 渲染只读：renderSceneCards 不得改动 sceneRules（同 SR-003 的 G1 纪律）
   const snap = JSON.stringify(T.__getSceneRules());
   T.renderSceneCards();
   check("SR-005b：渲染是只读的（渲染前后 sceneRules 逐字节相等）", JSON.stringify(T.__getSceneRules()) === snap);
 
-  // ⑨ 候选池常量：三场景齐备、只含 id/证据等级/摘出标记（活值现取，不搬快照数字）
-  check("SR-005b：SCENE_CANDIDATES 含三个场景",
-    JSON.stringify(T.SCENE_CANDIDATES.scenes.map((s) => s.alias)) === JSON.stringify(["fast", "code", "complex"]),
+  // ⑨ 候选池常量：折叠成 custom 一份，条目只含 id/证据等级/摘出标记（活值现取，不搬快照数字）
+  check("SR-005b：SCENE_CANDIDATES 折叠后只有 custom 一个场景（R165）",
+    JSON.stringify(T.SCENE_CANDIDATES.scenes.map((s) => s.alias)) === JSON.stringify(["custom"]),
     JSON.stringify(T.SCENE_CANDIDATES.scenes.map((s) => s.alias)));
   const allCand = T.SCENE_CANDIDATES.scenes.flatMap((s) => s.candidates);
   check("SR-005b：候选条目只有 id/report_evidence/routed_out 三个键（不夹带快照活值）",
     allCand.every((c) => JSON.stringify(Object.keys(c).sort()) === JSON.stringify(["id", "report_evidence", "routed_out"])),
     JSON.stringify(Object.keys(allCand[0] || {}).sort()));
-  check("SR-005b：候选池非空（每场景至少 3 个）",
-    T.SCENE_CANDIDATES.scenes.every((s) => s.candidates.length >= 3),
-    T.SCENE_CANDIDATES.scenes.map((s) => s.candidates.length).join(","));
-  check("SR-005b：候选池保留了 workbuddy 的 routed_out 标记（SD-5 不标注但数据要在）",
-    T.SCENE_CANDIDATES.scenes.some((s) => s.candidates.some((c) => c.routed_out === true)));
+  check("SR-005b：折叠后候选数 ≥ 各场景单独数量（合并去重，不丢项）",
+    allCand.length >= 3, String(allCand.length));
+  check("SR-005b：折叠后无重复 id（同 id 只留第一条）",
+    new Set(allCand.map((c) => c.id)).size === allCand.length);
+  check("SR-005b：候选池保留了 routed_out 标记（SD-5 不标注但数据要在）",
+    allCand.some((c) => c.routed_out === true));
 
   // ⑩ 接线：openSettings 必须真的调 openSceneEditor，且 openSceneEditor 里**有 await**。
-  // 这是 R-3b 的静态面：SD-7「每次打开重算重排」要求先取新数据，拿旧缓存冒充等于假动作。
-  // 不 await 的写法（`loadFees();` 不带 await）在功能上会「先渲染旧数据再异步刷新」，
-  // 而这恰恰是要防的——净效果与不刷新等价，却看起来像做了。
   const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
   const cssSrc = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
-  // ⚠️ 不能只查「openSceneEditor()」这个子串：注释里也含它（变异验证首跑 0 红就是这个原因）。
-  // 用「行首无 // 的 await 调用」判据——被注释掉的调用、以及被改名的调用都会红。
   check("SR-005b：openSettings 里**真的**调用了 openSceneEditor（非注释、非改名）",
     /\n\s*await openSceneEditor\(\);/.test(raw)
     && raw.indexOf('$("settingsOverlay").classList.remove("hidden")') < raw.indexOf("await openSceneEditor();"));
   check("SR-005b：openSceneEditor 内部 await 取数（不得用旧缓存冒充新数据，R-3b）",
-    /async function openSceneEditor\(\)[\s\S]{0,600}await loadFees\(\)/.test(raw));
+    /async function openSceneEditor\(\)[\s\S]{0,1600}await loadFees\(\)/.test(raw));
   check("SR-005b：openSettings 声明为 async（await openSceneEditor 需要）",
     /async function openSettings\(\)/.test(raw));
   check("SR-005b：index.html 有 #secScene 区块且排在 #secFallback 之前（A-1 挂载点）",
@@ -1108,7 +1100,6 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   check("SR-005b：#sceneCards 上挂了 change / keydown / click 三个委托",
     raw.includes('$("sceneCards").addEventListener("change"') && raw.includes('$("sceneCards").addEventListener("keydown"')
     && raw.includes('$("sceneCards").addEventListener("click"'));
-  // 用 indexOf 而不是正则：这个串里有 `('/` 与 `\/` 混排，写成正则会被 JS 解析成「提前闭合 + 非法 flag」。
   const saveFn = raw.split("async function saveSceneRouting")[1].split("async function")[0] || "";
   check("SR-005b：保存走的是原子端点（不是两次 POST 补偿，SD-6）",
     saveFn.includes('/api/config/scene_routing') && !saveFn.includes('/api/config/compat')
@@ -1117,7 +1108,98 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
     cssSrc.includes(".scene-card") && cssSrc.includes(".scene-lbl") && /a\.is-off/.test(cssSrc));
 }
 
-// ---- 场景 8：三场景推荐候选列表（SR-005c）----
+// ---- 场景 7.5：自动选路卡片（R165）----
+// 自动选路是「三条渠道 → 一个自定义 + 一个自动」的新增半边：面板必须能开关、
+// 能调权重、能预览决策（含每个候选被剔除的原因）。全部纯函数/字符串级断言。
+{
+  const htmlSrc = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const cssSrc = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+
+  check("R165：AUTO_ALIAS 是裸名 auto（带 / 会被网关当渠道前缀校验）", T.AUTO_ALIAS === "auto", T.AUTO_ALIAS);
+  check("R165：index.html 有 #autoCard 挂载点", htmlSrc.includes('id="autoCard"'));
+  check("R165：index.html 自动选路卡片排在自定义场景前面（先自动、后手写）",
+    htmlSrc.indexOf('id="autoCard"') > 0 && htmlSrc.indexOf('id="autoCard"') < htmlSrc.indexOf('id="sceneCards"'));
+
+  // autoNorm 补齐缺省字段：老配置（无 auto 段 / prefer_free 缺失）必须能渲染
+  const cfg0 = T.autoNorm({});
+  check("R165：autoNorm 对空配置补 prefer_free=true（诉求①：免费优先是默认）", cfg0.prefer_free === true);
+  check("R165：autoNorm 补 unknown_rate_policy=allow（默认放行未知费率）", cfg0.unknown_rate_policy === "allow");
+  check("R165：autoNorm 补 fallback_depth=3 / ttl=60 / min_perf_samples=10",
+    cfg0.fallback_depth === 3 && cfg0.ttl_seconds === 60 && cfg0.min_perf_samples === 10,
+    `${cfg0.fallback_depth}/${cfg0.ttl_seconds}/${cfg0.min_perf_samples}`);
+  check("R165：autoNorm 补默认权重结构（channel 5 维 + model 5 维）",
+    Object.keys(cfg0.weights.channel).length === 5 && Object.keys(cfg0.weights.model).length === 5,
+    JSON.stringify(Object.keys(cfg0.weights)));
+  check("R165：autoNorm 保留显式 false（running 里用户关掉免费优先不得被默认值覆盖）",
+    T.autoNorm({ prefer_free: false }).prefer_free === false);
+  check("R165：autoNorm 拒绝非法 unknown_rate_policy 值（回落 allow，不把垃圾值写回服务端）",
+    T.autoNorm({ unknown_rate_policy: "drop" }).unknown_rate_policy === "allow");
+
+  // 权重滑块元数据的 path 必须在默认权重里真实存在（不存在 = 滑块静默失效）
+  const paths = T.AUTO_WEIGHT_META.map((m) => m.path.join("."));
+  const flat = Object.keys(cfg0.weights.channel).map((k) => "channel." + k)
+    .concat(Object.keys(cfg0.weights.model).map((k) => "model." + k));
+  check("R165：AUTO_WEIGHT_META 每个 path 都是真实权重字段（否则滑块静默失效）",
+    paths.every((p) => flat.includes(p)) && flat.every((p) => paths.includes(p)),
+    paths.join(","));
+
+  // 渲染：卡片含开关/策略/深度/权重滑块/排除渠道/两个按钮
+  T.__setState({ auto: { enabled: true, prefer_free: true, unknown_rate_policy: "allow",
+    min_perf_samples: 10, fallback_depth: 3, ttl_seconds: 60, excluded_channels: [], weights: cfg0.weights },
+    compat: { channels: ["oczen", "kilo", "minimax"], model_map: {} } });
+  T.__setAutoDraft(null);
+  T.renderAutoCard();
+  const card = document.getElementById("autoCard").innerHTML;
+  check("R165：卡片有启用开关 #autoEnabled", card.includes('id="autoEnabled"'));
+  check("R165：卡片有免费优先开关 #autoPreferFree", card.includes('id="autoPreferFree"'));
+  check("R165：卡片有未知费率策略下拉（allow/deprioritize 两项）",
+    card.includes('id="autoUnknownRate"') && card.includes('value="allow"') && card.includes('value="deprioritize"'));
+  check("R165：卡片有备胎深度 / 缓存 / 样本下限三个数字框",
+    ['id="autoDepth"', 'id="autoTTL"', 'id="autoMinPerf"'].every((x) => card.includes(x)));
+  check("R165：卡片有 10 个权重滑块（data-auto-w 定位，渠道 5 + 模型 5）",
+    (card.match(/data-auto-w="/g) || []).length === 10, String((card.match(/data-auto-w="/g) || []).length));
+  check("R165：卡片有排除渠道勾选（按 compat.channels 生成）",
+    (card.match(/data-auto-excl="/g) || []).length === 3, String((card.match(/data-auto-excl="/g) || []).length));
+  check("R165：卡片有预览与保存两个按钮", card.includes('id="btnAutoPreview"') && card.includes('id="btnAutoSave"'));
+  T.__setAutoPreview(null);
+  T.renderAutoPreview();
+  check("R165：未预览时提示而不是空白",
+    document.getElementById("autoPreviewBox").innerHTML.includes("还没预览"));
+  check("R165：style.css 有自动选路卡片样式（.auto-card 与权重行）",
+    cssSrc.includes(".auto-card") && cssSrc.includes(".auto-w"));
+
+  // 预览渲染：首选高亮、备胎链、被剔除原因必须摊开（自动选路最容易被误判成抽风）
+  T.__setAutoPreview({
+    enabled: true, at: "2026-11-10T15:00:00+08:00",
+    decision: {
+      chosen: "kilo/cohere/north-mini-code:free", chain: ["kilo/cohere/north-mini-code:free", "traework/deepseek-v3"],
+      reason: "免费档里质价比最高", origin: "auto",
+      candidates: [
+        { public: "kilo/cohere/north-mini-code:free", channel: "kilo", model: "cohere/north-mini-code:free", tier: "free", score: 0.91, channel_score: 0.88, model_score: 0.93 },
+        { public: "traework/deepseek-v3", channel: "traework", model: "deepseek-v3", tier: "priced", score: 0.64, channel_score: 0.5, model_score: 0.72 },
+      ],
+      rejected: [{ public: "oczen/big-pickle", code: "no_tools", detail: "上游不支持工具调用" }],
+    },
+    channels: [{ name: "kilo", total_accounts: 11, healthy_accounts: 11, credits_na: false, credits: 0, expiring_credits: 0, terminal: false }],
+  });
+  T.renderAutoPreview();
+  const prev = document.getElementById("autoPreviewBox").innerHTML;
+  check("R165：预览显示首选模型", prev.includes("kilo/cohere/north-mini-code:free"));
+  check("R165：预览显示备胎链（第二顺位带序号）", prev.includes("traework/deepseek-v3") && prev.includes(">2<"));
+  check("R165：预览摊开被剔除原因（no_tools 必须可见，否则用户不知道该修什么）",
+    prev.includes("no_tools") && prev.includes("被剔除 1 个"));
+  check("R165：预览标注档位（免费/已定价）", prev.includes("免费") && prev.includes("已定价"));
+  check("R165：预览显示渠道快照（账号数/余额）", prev.includes("11/11"));
+
+  // 写入口只走 /api/config/auto，读预览只走 /api/auto/preview（不得混用 scene_routing）
+  check("R165：保存走唯一写入口 POST /api/config/auto",
+    /await api\("\/api\/config\/auto"/.test(raw));
+  check("R165：预览走 GET/POST /api/auto/preview", raw.includes('/api/auto/preview'));
+  check("R165：#autoCard 上挂了事件委托（每轮 innerHTML 重建不重挂）",
+    raw.includes('$("autoCard").addEventListener("click"') || raw.includes("box.addEventListener(\"click\""));
+}
+
+// ---- 场景 8：推荐候选列表（SR-005c，R165 收编后只剩 custom 一个 tab）----
 // 验收要点（SR-005 卡）：推荐行字段齐全、证据等级只标注不排序、数据年龄提示、
 // `cached_at` 解析、行内动作只改编辑态（不是第二个写入口）、每次展开都重算。
 {
@@ -1146,28 +1228,30 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   T.__setFees(fees);
   T.__setStats(stats);
   T.__setSceneRules(T.sceneNormalize(
-    { model_map: { fast: "qwenwork/flash", code: "traework/deepseek-v4.1-flash", complex: "raccoon/sn-deepseek-v4-1-flash-1017" } }, []));
+    { model_map: { custom: "traework/deepseek-v4.1-flash" } },
+    [{ from: "traework/deepseek-v4.1-flash", to: ["raccoon/sn-deepseek-v4-1-flash-1017"] }]));
 
   // ① 收起态：不渲染、不计算（"没展开却显示旧结果"不可能发生）
-  T.__setSceneRecState(false, "code");
+  T.__setSceneRecState(false, "custom");
   T.renderSceneRec();
   const collapsed = document.getElementById("sceneRecBody").innerHTML;
   check("SR-005c：收起时不渲染任何行（不浪费计算，也不会显示旧结果）", collapsed === "", collapsed.slice(0, 80));
   check("SR-005c：收起时面板带 hidden 类", document.getElementById("sceneRecPanel").classList.contains("hidden"));
 
   // ② 展开态：按 tab 场景渲染，行数 = rankCandidates 的长度（不是候选池原长）
-  T.__setSceneRecState(true, "code");
+  T.__setSceneRecState(true, "custom");
   T.renderSceneRec();
   const body = document.getElementById("sceneRecBody").innerHTML;
-  const expect = T.rankCandidates(fees, stats, "code", T.SCENE_CANDIDATES).length;
+  const expect = T.rankCandidates(fees, stats, "custom", T.SCENE_CANDIDATES).length;
   check("SR-005c：展开后行数 = rankCandidates 结果长度（口径单一来源）",
     (body.match(/class="rec-row"/g) || []).length === expect,
     `渲染 ${(body.match(/class="rec-row"/g) || []).length} / 期望 ${expect}`);
   check("SR-005c：展开时面板无 hidden 类", !document.getElementById("sceneRecPanel").classList.contains("hidden"));
-  check("SR-005c：三个场景 tab 齐备",
-    ["fast", "code", "complex"].every((a) => document.getElementById("sceneRecTabs").innerHTML.includes(`data-rec-tab="${a}"`)));
+  check("SR-005c：只有 custom 一个 tab（R165 收编）",
+    document.getElementById("sceneRecTabs").innerHTML.includes('data-rec-tab="custom"')
+    && !/data-rec-tab="(fast|code|complex)"/.test(document.getElementById("sceneRecTabs").innerHTML));
   check("SR-005c：当前 tab 高亮（primary）",
-    new RegExp(`primary" data-rec-tab="${"code"}"`).test(document.getElementById("sceneRecTabs").innerHTML));
+    new RegExp(`primary" data-rec-tab="${"custom"}"`).test(document.getElementById("sceneRecTabs").innerHTML));
 
   // ③ 行内字段齐全（卡上验收项）：序号/渠道徽标/模型ID/状态/倍率/上下文/能力/动作/证据
   check("SR-005c：行含排序序号 rec-rank", /class="rec-rank"/.test(body));
@@ -1180,12 +1264,12 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   check("SR-005c：行含证据等级区块", /class="rec-evbox"/.test(body));
 
   // ④ 证据等级只标注、不排序（SD-2 的核心）——把 evidence 全改成 unverified 后顺序必须不变
-  const order1 = (T.rankCandidates(fees, stats, "code", T.SCENE_CANDIDATES) || []).map((x) => x.id).join(",");
+  const order1 = (T.rankCandidates(fees, stats, "custom", T.SCENE_CANDIDATES) || []).map((x) => x.id).join(",");
   // ⚠️ 判据必须用「**删掉**证据字段」而不是「全改成同一个值」：后者在"证据进排序"的变异下
   //    会让主键全部相等、恰好退回原序，于是断言假绿（本条首跑 0 红正是这个原因）。
   const cands2 = JSON.parse(JSON.stringify(T.SCENE_CANDIDATES));
   cands2.scenes.forEach((s) => s.candidates.forEach((c) => { delete c.report_evidence; }));
-  const order2 = (T.rankCandidates(fees, stats, "code", cands2) || []).map((x) => x.id).join(",");
+  const order2 = (T.rankCandidates(fees, stats, "custom", cands2) || []).map((x) => x.id).join(",");
   check("SR-005c：删掉证据等级后排序完全不变（SD-2：证据不得进排序）", order1 === order2, `有证据 ${order1.slice(0, 50)} / 无证据 ${order2.slice(0, 50)}`);
   // 再加一条静态面：排序代码段里根本不该出现 evidence 字样（比数值断言更难糊弄）
   {
@@ -1236,13 +1320,13 @@ check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[
   T.__setFees(fees);
 
   // ⑦ 行内动作只改编辑态，绝不自己发写请求（SD-6 只有一条写入口）
-  T.__setSceneRecState(true, "fast");
+  T.__setSceneRecState(true, "custom");
   T.renderSceneRec();
   const beforeRules = JSON.stringify(T.__getSceneRules());
-  T.sceneSetFrom("fast", "traework/deepseek-v4.1-flash");
+  T.sceneSetFrom("custom", "kilo/nvidia/nemotron-3-ultra-550b-a55b:free");
   check("SR-005c：「设为主模型」只改 sceneRules（编辑态）",
-    T.__getSceneRules().fast.from === "traework/deepseek-v4.1-flash",
-    T.__getSceneRules().fast.from);
+    T.__getSceneRules().custom.from === "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+    T.__getSceneRules().custom.from);
   check("SR-005c：点行内动作后没有自动落盘（sceneRules 仍需用户点保存）",
     JSON.stringify(T.__getSceneRules()) !== beforeRules);
 
@@ -1804,7 +1888,7 @@ const LIVE_FB = [
       (html.match(/🔍 查询模型/g) || []).length === 4],
     ["模型降级链标题右侧有查找入口", /模型降级链[\s\S]{0,80}data-model-search/.test(html)],
     ["思考强度标题右侧有查找入口", /思考强度[\s\S]{0,80}data-model-search/.test(html)],
-    ["三场景路由标题右侧有查找入口", /三场景路由[\s\S]{0,80}data-model-search/.test(html)],
+    ["自定义场景标题右侧有查找入口", /自定义场景（custom）[\s\S]{0,120}data-model-search/.test(html)],
     ["app.js 统一接线 data-model-search → openModelSearch",
       /querySelectorAll\("\[data-model-search\]"\)/.test(raw) && raw.includes("el.onclick = openModelSearch")],
     ["style.css 有 .cfg-search-btn 样式（宽度自适应，与首页 search-btn 同源）",
@@ -1870,7 +1954,13 @@ const LIVE_FB = [
       // R129：settingsOverlay 已删除（设置改「其他」Tab），故它不再是悬空引用；
       // 但 app.js 里若还残留 $("settingsOverlay") 就是真悬空——此处不放行，
       // 让「忘了删干净」直接变红（上面只剩注释提到它，注释不参与 $() 匹配）。
-      const dyn = new Set(["creditTip"]);
+      // 动态生成的一律放行（R165 扩充）：
+      //   creditTip  —— newCreditTip() 创建
+      //   auto*      —— 自动选路卡片由 renderAutoCard 每轮 innerHTML 重建（其内部控件 id 不存在于 index.html，
+      //                 这是刻意设计：卡片内容随配置变化，静态骨架反而会与运行时不一致）
+      const dyn = new Set(["creditTip", "autoEnabled", "autoPreferFree", "autoUnknownRate", "autoDepth",
+        "autoTTL", "autoMinPerf", "autoPreviewTools", "autoPreviewBox", "autoHint",
+        "btnAutoPreview", "btnAutoSave"]);
       const ids = new Set([...html.matchAll(/id="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
       const missing = [...new Set([...raw.matchAll(/\$\("([A-Za-z0-9_-]+)"\)/g)].map((m) => m[1]))]
         .filter((id) => !ids.has(id) && !dyn.has(id));
@@ -2469,6 +2559,18 @@ const LIVE_FB = [
     ["checkin() 对无资格不再说「会自动重试」（先判无资格，再判 retryable）",
       raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(r.msg') > 0 &&
       raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(r.msg') < raw.indexOf('!r.ok && r.retryable')],
+    // 2026-11-10：无资格改判**终态**（后端 ok=true / retryable=false）后，
+    // 「终态」不等于「签到成功」——若不把它从成功档里剔出去，面板会出现假成功
+    // （账号卡片写「签到成功」、首页写「已签到 5/5」，而该账号一分没领）。
+    ["无资格判据先于 ok 判据（终态无资格不得落进「签到成功」）",
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(msg)') > 0 &&
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(msg)') < raw.indexOf('if (!r.ok)')],
+    ["账号卡片把无资格单列一档（不得显示「签到成功」）",
+      /无积分领取活动资格\|无领取资格/.test(raw) && /无资格/.test(raw)],
+    ["首页「已签到」不把无资格算进去（不得假成功）",
+      /last_checkin_ok && !isNoElig\(a\)/.test(raw)],
+    ["批量签到把无资格从「成功」里剔出来单独报",
+      /noElig\.length/.test(raw) && /不会自动重试/.test(raw)],
     ["失败判据先于 \\+N 判据（否则「领取失败 http 400」会被数字命中）",
       raw.indexOf('CHECKIN_FAIL_RE.test(msg)') > 0 && raw.indexOf('CHECKIN_FAIL_RE.test(msg)') < raw.indexOf('/\\+-?\\d+/.test(msg)')],
     ["qodercom 不在无签到集合（campaigns 活动路径已实装）", !/NO_EXPLICIT_CHECKIN[^)]*"qodercom"/.test(raw)],

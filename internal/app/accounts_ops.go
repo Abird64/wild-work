@@ -99,13 +99,27 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 		}
 	}
 	ok := 0
+	noElig := 0
 	for _, r := range results {
-		if r.OK {
+		switch {
+		case isNoEligibilityMsg(r.Msg):
+			// 无资格是**终态**：结构化路径里 OK = !Retryable ⇒ r.OK 为真，
+			// 但它**不等于「领到积分」**（R164）。单独计数，避免日志把「无资格」说成签到成功。
+			noElig++
+		case r.OK:
 			ok++
 		}
 	}
-	log.Printf("批量签到完成：total=%d ok=%d failed=%d", len(results), ok, len(results)-ok)
+	log.Printf("批量签到完成：total=%d ok=%d no_eligibility=%d failed=%d", len(results), ok, noElig, len(results)-ok-noElig)
 	return results
+}
+
+// isNoEligibilityMsg 判定签到结果文案是否为「该账号无积分领取活动资格」。
+//
+// 终态无资格在结构化路径里 OK=true（R164），故后端必须靠**文案**把它从「成功」里摘出来；
+// 前端用同一套措辞（CHECKIN_NO_ELIGIBILITY_RE）判定，两侧口径必须一致。
+func isNoEligibilityMsg(msg string) bool {
+	return strings.Contains(msg, "无积分领取活动资格") || strings.Contains(msg, "无领取资格")
 }
 
 // RemoveAccount 删除账号（auth 文件 + 内存池）。

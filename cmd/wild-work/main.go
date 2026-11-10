@@ -31,6 +31,7 @@ import (
 
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
+	"wild-work/internal/auto"
 	"wild-work/internal/cline"
 	"wild-work/internal/codearts"
 	"wild-work/internal/config"
@@ -765,6 +766,19 @@ func main() {
 	appInst.SetOczenSyncer(ocUp.SetAPIKey)
 	ocUp.SetAPIKey(cfg.OczenAPIKey)
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
+	// 自动选路（R165）：内层与外层共用同一个解析器（app 层的快照装配 + 决策缓存），
+	// 因此 `/v1/chat/completions` 与 `/v1/responses` `/v1/messages` 对 `model:"auto"`
+	// 必须落到同一个模型——两套解析器就是两套口径，会出现「同一句话换协议换模型」。
+	resolver := appInst.AutoResolver()
+	inner.SetAutoResolver(resolver)
+	compat.SetAutoResolver(resolver)
+	// 面板保存自动选路配置后，把新配置推给 app 层引擎（否则要重启才生效）。
+	// 解析器本身读的是 app.cfg.Auto，故无需再推给 inner/compat。
+	appInst.SetAutoConfigSyncer(func(cfgAuto auto.Config) {
+		log.Printf("auto 配置已更新：enabled=%v prefer_free=%v depth=%d ttl=%ds",
+			cfgAuto.Enabled, cfgAuto.PreferFree == nil || *cfgAuto.PreferFree,
+			cfgAuto.FallbackDepth, cfgAuto.TTLSeconds)
+	})
 	compat.SetSystemOneHandler(func(w http.ResponseWriter, r *http.Request, state string, questions map[string]any) (int, []byte, error) {
 		return ocUp.SystemOne(state, questions)
 	})

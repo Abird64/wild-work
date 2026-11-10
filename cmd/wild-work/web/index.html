@@ -152,14 +152,18 @@
 
     <!-- ===== Tab: 模型管理（三场景 + 费率）===== -->
     <div class="mtab-body hidden" id="mtabModels">
-    <div class="panel-head"><h2>三场景路由</h2>
-      <span class="hint">点「保存」一次事务落盘（R127：三别名 + 三条链 + compat 同一次写入）</span></div>
+    <div class="panel-head"><h2>路由：自动选路 + 自定义场景</h2>
+      <span class="hint">R165：三场景收编为一个自定义场景 + 一个自动选路（模型名写 <code>auto</code>）</span></div>
     <div id="modelsSceneHost">
       <div class="cfg-section" id="secScene">
-        <div class="cfg-heading"><span>三场景路由</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
-            客户端把模型名填成 <code>fast</code> / <code>code</code> / <code>complex</code> 时，这里决定它<b>实际打到哪个渠道的哪个模型</b>，以及打不通时按什么顺序换备胎。<br><br>
-            三场景是<b>一个整体</b>：别名指向与备胎链必须同时成立，故这里<b>一次保存写全部三项</b>（服务端原子写）。改一个场景不会只落一半。<br><br>
-            <b>互为备胎是合法的</b>：code 的主模型可以出现在 complex 的备胎链里，反之亦然（现役配置就是这么用的）。只有「备胎 = 自己这条链的主模型」（自环）会被拒。<br><br>
+        <div class="cfg-heading"><span>自动选路（auto）</span></div>
+        <!-- R165：客户端 model 写 auto 时，按「免费额度/余额/模型质价比」当场决策（internal/auto） -->
+        <div id="autoCard"></div>
+
+        <div class="cfg-heading" style="margin-top:14px"><span>自定义场景（custom）</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
+            客户端把模型名填成 <code>custom</code> 时，这里决定它<b>实际打到哪个渠道的哪个模型</b>，以及打不通时按什么顺序换备胎。<br><br>
+            <b>自动选路（<code>auto</code>）</b>不走这张表：它由打分引擎按「免费额度是否还有 / 余额多少 / 模型质价比 / 实测速度」当场算出一个具体模型，响应头 <code>X-Model-Auto-Chosen</code> 会告知实际选中谁。<br><br>
+            旧别名 <code>fast</code> / <code>code</code> / <code>complex</code> 已退役：<code>complex</code> 的链已继承到 <code>custom</code>，另两个的名字仍可用（走自动选路之外的历史映射）。<br><br>
             保存前会把<b>当前值自动复制到剪贴板</b>，万一改坏了可直接粘回来。<br><br>
             点「预检」只校验并显示服务端提醒，<b>不写盘</b>。
           </span></span></div>
@@ -167,7 +171,7 @@
         <div class="row fb-foot-actions" style="margin-top:8px">
           <button class="btn small" id="btnSceneCopy" title="把当前生效的三别名映射与三条降级链复制到剪贴板（保存前后都可点）">复制当前配置</button>
           <button class="btn small" id="btnSceneDryRun" title="只校验 + 显示提醒，不写盘">预检（不写盘）</button>
-          <button class="btn small primary" id="btnSceneSave" title="保存前自动把旧值复制到剪贴板，然后原子写盘">保存三场景</button>
+          <button class="btn small primary" id="btnSceneSave" title="保存前自动把旧值复制到剪贴板，然后原子写盘">保存自定义场景</button>
         </div>
         <div class="hint" id="sceneWarn" style="color:var(--warn);margin-top:6px"></div>
         <div class="hint" id="sceneErr" style="color:var(--danger)"></div>

@@ -65,9 +65,12 @@ func withCheckinServer(t *testing.T, h http.HandlerFunc) {
 }
 
 // TestRealPayloadWithoutClaimBenefitIsNoCampaign 真实响应（无 CLAIM_BENEFIT 条目）必须：
-//   - 判成 no_campaign 且可重试（不是「今日已完成」，也不是 error）；
+//   - 判成 no_eligibility（终态，不重试）——回包里连一条领积分活动都没有 ⇒ 该账号无资格；
 //   - **不发** claim 请求（没有可领对象时绝不能瞎领）；
 //   - Msg 带上游摘要，让面板能区分「上游没发活动」与「本工具故障」。
+//
+// 2026-11-10：无资格改判终态后，这条真实回包就是生产上 qodercom 账号的实际形态
+// （只有 VIEW_DETAILS 推广活动，没有任何 CLAIM_BENEFIT）⇒ 当天不再每分钟打上游。
 func TestRealPayloadWithoutClaimBenefitIsNoCampaign(t *testing.T) {
 	var claimCalled bool
 	withCheckinServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -81,27 +84,33 @@ func TestRealPayloadWithoutClaimBenefitIsNoCampaign(t *testing.T) {
 
 	rep, err := checkin(newAuth())
 	if err != nil {
-		t.Fatalf("no_campaign 不是 error：%v", err)
+		t.Fatalf("无资格不是 error：%v", err)
 	}
-	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+	if rep.Status != provider.CheckinNoEligibility {
+		t.Fatalf("report = %+v, want no_eligibility（终态）：回包里没有任何领积分活动", rep)
+	}
+	if rep.Status.Retryable() {
+		t.Error("no_eligibility 不得可重试")
 	}
 	if claimCalled {
 		t.Error("无可领活动时发出了 claim")
 	}
-	for _, want := range []string{"showCampaign=true", "claimable=false", "VIEW_DETAILS=CLAIMED", "1 条活动"} {
+	for _, want := range []string{"showCampaign=true", "claimable=false", "VIEW_DETAILS=CLAIMED", "1 条活动", "无积分领取活动资格"} {
 		if !strings.Contains(rep.Msg, want) {
 			t.Errorf("诊断文案缺 %q：%s", want, rep.Msg)
 		}
 	}
 }
 
-// TestEmptyCampaignListDiagnostics 列表为空 → no_campaign，文案要如实说明这是**账号资格**问题。
+// TestEmptyCampaignListDiagnostics 列表为空 → no_eligibility（终态），文案要如实说明这是**账号资格**问题。
 //
 // 2026-10-18 定性更新：空列表不必然是「10:00 整点还没创建」。用户实测确认
 // **上游按账号下发活动资格**——没有资格的号，连活动体系开关都可能是关的（showCampaign=false），
 // 而在官方客户端里同样看不到入口。因此文案必须说「该账号无积分领取活动资格」+「不是本工具的问题」，
 // 否则用户会把资格问题读成工具故障（10-17 起反复误判的根源）。
+//
+// 2026-11-10 增补：状态位从 no_campaign（可重试）改为 no_eligibility（终态）——
+// 回包里连一条领积分活动都没有，重试到窗口结束也不会变。
 func TestEmptyCampaignListDiagnostics(t *testing.T) {
 	withCheckinServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != EpCampaigns || r.Method != http.MethodGet {
@@ -115,8 +124,11 @@ func TestEmptyCampaignListDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkin: %v", err)
 	}
-	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+	if rep.Status != provider.CheckinNoEligibility {
+		t.Fatalf("report = %+v, want no_eligibility（终态）", rep)
+	}
+	if rep.Status.Retryable() {
+		t.Error("no_eligibility 不得可重试")
 	}
 	for _, want := range []string{"无积分领取活动资格", "不是本工具的问题", "showCampaign=false", "上游未下发任何活动"} {
 		if !strings.Contains(rep.Msg, want) {
@@ -217,7 +229,8 @@ func TestObjectFormStillAccepted(t *testing.T) {
 
 // TestUnrecognizedEnumDoesNotClaim claimStatus 是没见过的新枚举时：
 //   - 绝不发 claim（不误领）；
-//   - 判成 no_campaign 并可重试；
+//   - 判成 no_campaign 并可重试（**有** CLAIM_BENEFIT 条目 ⇒ 该账号有资格，
+//     只是上游换了枚举形态，等它刷新即可；2026-11-10 起终态只给「一条领积分活动都没有」）；
 //   - 诊断文案把**原始取值**带出来，让「上游新增了枚举」一眼可见。
 //
 // 这正是本渠道历史上被判错的盲区：取值变了却只有一句笼统的 no_campaign。
@@ -235,7 +248,7 @@ func TestUnrecognizedEnumDoesNotClaim(t *testing.T) {
 		t.Fatalf("checkin: %v", err)
 	}
 	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+		t.Fatalf("report = %+v, want no_campaign (retryable)：有 CLAIM_BENEFIT 条目 ⇒ 有资格，不能判成终态", rep)
 	}
 	if !strings.Contains(rep.Msg, "CLAIMABLE_V2") {
 		t.Errorf("msg = %q, want 带出新枚举原始取值", rep.Msg)
@@ -258,7 +271,7 @@ func TestMalformedClaimStatusDoesNotClaim(t *testing.T) {
 		t.Fatalf("checkin: %v", err)
 	}
 	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+		t.Fatalf("report = %+v, want no_campaign (retryable)：有 CLAIM_BENEFIT 条目 ⇒ 有资格，不能判成终态", rep)
 	}
 	if !strings.Contains(rep.Msg, "未知") || !strings.Contains(rep.Msg, "123") {
 		t.Errorf("msg = %q, want 「未知」+ 原始取值", rep.Msg)
@@ -266,7 +279,7 @@ func TestMalformedClaimStatusDoesNotClaim(t *testing.T) {
 }
 
 // TestViewDetailsClaimedDoesNotMaskNoCampaign VIEW_DETAILS 活动的 CLAIMED 不是「今天的签到已领」：
-// 列表里没有任何 CLAIM_BENEFIT 时仍必须是 no_campaign（保持窗口重试），不得被误判成已完成。
+// 列表里没有任何 CLAIM_BENEFIT 时不得被误判成已完成 —— 判成 no_eligibility（终态，无资格）。
 func TestViewDetailsClaimedDoesNotMaskNoCampaign(t *testing.T) {
 	onlyView := `{"showCampaign":true,"claimable":false,"campaigns":[
 	  {"campaignId":"c2","campaignKey":"act-20260901-493","actionType":"VIEW_DETAILS",
@@ -283,7 +296,10 @@ func TestViewDetailsClaimedDoesNotMaskNoCampaign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkin: %v", err)
 	}
-	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Fatalf("report = %+v, want no_campaign (retryable)", rep)
+	if rep.Status != provider.CheckinNoEligibility {
+		t.Fatalf("report = %+v, want no_eligibility（终态）：只有 VIEW_DETAILS，没有任何 CLAIM_BENEFIT", rep)
+	}
+	if rep.Status.Retryable() {
+		t.Error("no_eligibility 不得可重试")
 	}
 }

@@ -15,8 +15,17 @@ function renderAccounts() {
       ? "无需手动签到：定时自动对话保活并领取日活奖励"
       : `${chLabel(a.group)} 不支持手动签到`;
 
+    // 签到徽标三档（2026-11-10 起「无资格」独立成档）：
+    //   - 无资格（该账号没有这个活动的资格，终态，当天不会再自动重试）⇒ warn 档，
+    //     **不得显示成「签到成功」**——那会让用户以为领到了积分；
+    //   - ok=true ⇒ 签到成功；ok=false ⇒ 签到失败。
+    // 判据用 last_checkin_msg 的措辞（后端直说「无积分领取活动资格」），
+    // 与 app-actions.js 的 CHECKIN_NO_ELIGIBILITY_RE 同一口径。
+    const noElig = a.last_checkin_at && /无积分领取活动资格|无领取资格/.test(a.last_checkin_msg || "");
     const checkinTag = a.last_checkin_at
-      ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
+      ? (noElig
+        ? `<span class="tag warn" title="${esc(a.last_checkin_msg || "该账号无积分领取活动资格")}">无资格</span>`
+        : `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`)
       : (noCheckin ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>` : '<span class="tag neutral">未签到</span>');
 
     const disabledClass = a.disabled ? " disabled" : "";

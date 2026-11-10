@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/backuplink"
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
@@ -138,6 +139,9 @@ type State struct {
 
 	// CustomChannels 自定义第三方渠道列表（保存走 POST /api/config/custom_channels，R66）。
 	CustomChannels []custom.ChannelConfig `json:"custom_channels"`
+
+	// Auto 自动选路配置（只读，保存走 POST /api/config/auto，R165）。
+	Auto auto.Config `json:"auto"`
 }
 
 // GetState 返回面板初始数据。
@@ -195,6 +199,7 @@ func (a *App) GetState() State {
 	// 自定义渠道路由的 api_key 同样脱敏回显（不把上游密钥明文送进面板载荷）。
 	// 返回深拷贝而非配置引用，避免调用方意外改写配置。
 	st.CustomChannels = maskCustomChannels(a.cfg.CustomChannels)
+	st.Auto = a.cfg.Auto
 	st.Accounts = a.accountViews()
 	return st
 }

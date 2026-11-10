@@ -269,7 +269,10 @@ func TestCheckinAlreadyClaimed(t *testing.T) {
 	}
 }
 
-// TestCheckinNoCampaignIsRetryable 活动列表为空 → no_campaign 且可重试（不当日完成）。
+// TestCheckinNoCampaignIsRetryable 活动列表为空 → no_eligibility（终态，当天不再重试）。
+//
+// 2026-11-10：空列表 ⇒ 回包里连一条领积分活动都没有 ⇒ 该账号无资格（2026-10-18 实测定性）。
+// 终态让调度器把该时段标记为已完成 ⇒ 不再 10:00–12:00 每分钟打一次上游。
 func TestCheckinNoCampaignIsRetryable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -286,10 +289,13 @@ func TestCheckinNoCampaignIsRetryable(t *testing.T) {
 
 	rep, err := checkin(newAuth())
 	if err != nil {
-		t.Fatalf("no_campaign is not an error: %v", err)
+		t.Fatalf("无资格不是 error: %v", err)
 	}
-	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
-		t.Errorf("report = %+v, want no_campaign (retryable)", rep)
+	if rep.Status != provider.CheckinNoEligibility {
+		t.Errorf("report = %+v, want no_eligibility（终态）", rep)
+	}
+	if rep.Status.Retryable() {
+		t.Error("no_eligibility 不得可重试")
 	}
 }
 

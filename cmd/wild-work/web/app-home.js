@@ -12,12 +12,17 @@ function renderHomeCards() {
   const accs = state.accounts || [];
   const st = lastStats || {};
   const tu = st.token_usage || {};
-  const signed = accs.filter((a) => a.last_checkin_ok).length;
+  // 「已签到 N/M」只数**真领到/今日已领**的账号。
+  // 2026-11-10 起「无资格」是终态（后端 ok=true），但它**不是**签到成功——
+  // 把它算进 signed 会让首页显示「已签到 5/5」，而其中一个号一分没领 ⇒ 假成功。
+  const isNoElig = (a) => /无积分领取活动资格|无领取资格/.test(a.last_checkin_msg || "");
+  const signed = accs.filter((a) => a.last_checkin_ok && !isNoElig(a)).length;
+  const noEligN = accs.filter((a) => a.last_checkin_at && isNoElig(a)).length;
   const na = accs.filter((a) => a.credits_na).length;
   const canSign = accs.length - na;
   const cards = [
     { l: "账号总数", v: String(accs.length),
-      s: `已签到 ${signed}/${canSign}${na ? ` · 不适用 ${na}` : ""}`,
+      s: `已签到 ${signed}/${canSign}${noEligN ? ` · 无资格 ${noEligN}` : ""}${na ? ` · 不适用 ${na}` : ""}`,
       cls: signed >= canSign ? "ok" : "warn" },
     { l: "今日获得积分", v: st.credit_in != null ? `+${fmtCredits(st.credit_in)}` : "—", s: "签到与每日发放", cls: "ok" },
     { l: "今日消耗积分", v: st.credit_used != null ? fmtCredits(st.credit_used) : "—",

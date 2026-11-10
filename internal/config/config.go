@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"wild-work/internal/auto"
 	"wild-work/internal/backuplink"
 	"wild-work/internal/custom"
 )
@@ -224,6 +225,10 @@ type Config struct {
 		LoopGuard bool `json:"loop_guard"`
 	} `json:"features"`
 
+	// Auto 自动选路（auto）配置。零值 = 用 internal/auto 的默认配置。
+	// 详见 docs/决议项.md R165。
+	Auto auto.Config `json:"auto,omitempty"`
+
 	// CustomChannels 自定义第三方 OpenAI 兼容渠道列表（R66）。
 	CustomChannels []custom.ChannelConfig `json:"custom_channels,omitempty"`
 
@@ -272,6 +277,8 @@ func Default() *Config {
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Features.LoopGuard = true // 思考链死循环检测默认开启（面板可关）
+	// 自动选路：默认开启（免费优先 + 质价比加权），R165。
+	c.Auto = auto.DefaultConfig()
 	return c
 }
 
@@ -578,7 +585,125 @@ func (c *Config) normalize() error {
 		}
 		seenCustom[ch.Name] = true
 	}
+	// 自动选路段：缺省项补默认，非法值退回默认（不报错——面板可改，不该让配置整个加载失败）。
+	c.Auto = normalizeAuto(c.Auto)
+	// 场景别名迁移（R165）：三场景（fast/code/complex）→ 一自定义（custom）+ 一自动（auto）。
+	migrateSceneAliases(c)
 	return nil
+}
+
+// sceneLegacyAliases 已被 R165 收编的三个旧场景别名。
+//
+// 它们从「可编辑的自定义场景」降级为**可选的历史别名**：保留 model_map 键是为了不把
+// 已经在用的客户端（Claude Code / Codex 之类把 `fast` 写进配置的）当场打死；
+// 但面板不再为它们提供编辑器，写入端也不再维护它们（`SetSceneRouting` 只管 custom）。
+var sceneLegacyAliases = []string{"fast", "code", "complex"}
+
+// sceneCustomAlias 收编后唯一的自定义场景别名（原 complex 链的继承者）。
+const sceneCustomAlias = "custom"
+
+// migrateSceneAliases 把三场景配置一次性迁到「一自定义 + 一自动」（R165）。
+//
+// 动作（幂等，重复加载无副作用）：
+//  1. `custom` 缺失而 `complex` 存在 ⇒ `custom = complex`（复杂链是三条里最通用的一条，
+//     设计裁定的继承者）。`custom` 已存在则**不动**用户后来的选择。
+//  2. 删掉 model_map 里的 `fast` / `code`：这两个场景的能力需求（工具/低延迟）
+//     已由自动选路的硬门 + 打分覆盖，留着只会让「面板里看不见、运行时仍在生效」的
+//     幽灵别名存在（最容易被误判成"配置没生效"）。
+//  3. `complex` 键删除（它的值已落到 custom 上）。
+//  4. `model_fallback` 里 From 等于旧别名指向模型的规则：把 From 改写成 `custom` 的
+//     From（继承），其余 `fast`/`code` 专属规则连同其孤儿规则一并移除。
+//
+// 为什么在 config.normalize 里做而不是单独一个迁移命令：本工具没有版本号驱动的
+// 迁移框架，normalize 是**所有加载路径的唯一收口**（启动、面板保存、测试都过它），
+// 且动作是幂等的，比"记得跑一条命令"可靠。
+func migrateSceneAliases(c *Config) {
+	if c.Compat.ModelMap == nil {
+		c.Compat.ModelMap = map[string]string{}
+	}
+	m := c.Compat.ModelMap
+	// ① 继承：complex → custom。
+	if strings.TrimSpace(m[sceneCustomAlias]) == "" {
+		if v := strings.TrimSpace(m["complex"]); v != "" {
+			m[sceneCustomAlias] = v
+		}
+	}
+	customFrom := strings.TrimSpace(m[sceneCustomAlias])
+	// 守卫：既没有 custom 也没有可继承的 complex ⇒ 这是「只用过 fast/code 的老配置」或
+	// 「从没用过场景别名」。此时**一个字都不动**——把用户唯一在用的别名删掉、
+	// 又没有接管者，等于让客户端拿一个失效的模型名去撞 400（迁移不得制造新故障）。
+	if customFrom == "" {
+		return
+	}
+	// ②③ 旧别名**转发**到 custom（不删除，含 complex）。
+	//
+	// 为什么不删：model_map 的键就是客户端 model 字段的取值。删掉 fast/code/complex
+	// 等于让任何还写着旧名的客户端（Cursor / Claude Code / 自己脚本）下一次请求直接
+	// 撞 400 invalid_model——收编是面板层的减法，不该变成客户端层的断线（迁移不得制造新故障）。
+	// 转发后旧名与 custom 打到同一个模型，行为等价于「旧名 = custom 的老拼写」；
+	// 面板不可编辑它们（isSceneAlias 只认 custom），/v1/models 里标注为旧名。
+	legacyTargets := make(map[string]bool, len(sceneLegacyAliases))
+	for _, a := range sceneLegacyAliases {
+		if v := strings.TrimSpace(m[a]); v != "" && v != customFrom {
+			legacyTargets[v] = true
+		}
+		m[a] = customFrom
+	}
+	if customFrom != "" {
+		delete(legacyTargets, customFrom)
+	}
+	if len(legacyTargets) == 0 || len(c.ModelFallback) == 0 {
+		return
+	}
+	// ④ 降级链：旧主模型的规则改成挂在 custom 的主模型上（保住用户手写的备胎顺序），
+	//    custom 已有同 From 规则时保留用户现有的那条。
+	kept := make([]ModelFallbackRule, 0, len(c.ModelFallback))
+	haveCustom := map[string]bool{}
+	for _, r := range c.ModelFallback {
+		if strings.TrimSpace(r.From) == customFrom {
+			haveCustom[r.From] = true
+		}
+	}
+	for _, r := range c.ModelFallback {
+		from := strings.TrimSpace(r.From)
+		if !legacyTargets[from] {
+			kept = append(kept, r)
+			continue
+		}
+		if customFrom == "" || haveCustom[customFrom] {
+			continue // 无处继承（或用户已自建 custom 规则）⇒ 旧规则退场
+		}
+		r.From = customFrom
+		haveCustom[customFrom] = true
+		kept = append(kept, r)
+	}
+	c.ModelFallback = kept
+}
+
+// normalizeAuto 归一化自动选路配置：缺省项填默认，非法取值退回默认。
+//
+// 判据（与 internal/auto 的默认值同源）：
+//   - PreferFree 为 nil ⇒ 默认 true（免费优先）；显式 false 保留。
+//   - UnknownRatePolicy 只认 allow / deprioritize。
+//   - MinPerfSamples / FallbackDepth / TTLSeconds 的下界保护（<=0 走默认）。
+func normalizeAuto(c auto.Config) auto.Config {
+	d := auto.DefaultConfig()
+	if c.PreferFree == nil {
+		c.PreferFree = d.PreferFree
+	}
+	if c.UnknownRatePolicy != auto.UnknownRateAllow && c.UnknownRatePolicy != auto.UnknownRateDeprioritize {
+		c.UnknownRatePolicy = d.UnknownRatePolicy
+	}
+	if c.MinPerfSamples <= 0 {
+		c.MinPerfSamples = d.MinPerfSamples
+	}
+	if c.FallbackDepth <= 0 {
+		c.FallbackDepth = d.FallbackDepth
+	}
+	if c.TTLSeconds <= 0 {
+		c.TTLSeconds = d.TTLSeconds
+	}
+	return c
 }
 
 // hardCooldownLoc 每日发奖窗口的时区口径：固定 UTC+8 墙钟（与各渠道上游一致）。
